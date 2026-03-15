@@ -12,22 +12,6 @@ export interface SessionState {
   selectedWorldId: string | null;
 }
 
-export type XrSessionStatus =
-  | "unsupported"
-  | "available"
-  | "entering"
-  | "presenting"
-  | "error";
-
-export interface XrSessionState {
-  checked: boolean;
-  supported: boolean;
-  canEnter: boolean;
-  isPresenting: boolean;
-  status: XrSessionStatus;
-  message: string | null;
-}
-
 export type AppState =
   | { kind: "menu" }
   | { kind: "loading"; world: WorldDefinition }
