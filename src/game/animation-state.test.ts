@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAnimationState } from "./animation-state";
 
 describe("resolveAnimationState", () => {
-  it("returns idle by default", () => {
+  it("returns run and shoot by default", () => {
     expect(
       resolveAnimationState({
         isMoving: false,
@@ -11,24 +11,24 @@ describe("resolveAnimationState", () => {
         isJumping: false,
         isCrouching: false
       })
-    ).toBe("idle");
+    ).toBe("runAndShoot");
   });
 
-  it("prefers jump over every grounded state", () => {
+  it("keeps run and shoot while airborne", () => {
     expect(
       resolveAnimationState({
         isMoving: true,
         isShooting: true,
         isJumping: true,
-        isCrouching: true
+        isCrouching: false
       })
-    ).toBe("jumping");
+    ).toBe("runAndShoot");
   });
 
-  it("uses crouch walk when crouching and moving", () => {
+  it("uses crouch walk when crouching without movement", () => {
     expect(
       resolveAnimationState({
-        isMoving: true,
+        isMoving: false,
         isShooting: false,
         isJumping: false,
         isCrouching: true
@@ -36,18 +36,18 @@ describe("resolveAnimationState", () => {
     ).toBe("crouchWalk");
   });
 
-  it("uses run and shoot when moving and firing", () => {
+  it("keeps crouch walk over shooting and jumping", () => {
     expect(
       resolveAnimationState({
         isMoving: true,
         isShooting: true,
-        isJumping: false,
-        isCrouching: false
+        isJumping: true,
+        isCrouching: true
       })
-    ).toBe("runAndShoot");
+    ).toBe("crouchWalk");
   });
 
-  it("uses running when moving without shooting", () => {
+  it("keeps run and shoot while moving without firing", () => {
     expect(
       resolveAnimationState({
         isMoving: true,
@@ -55,6 +55,6 @@ describe("resolveAnimationState", () => {
         isJumping: false,
         isCrouching: false
       })
-    ).toBe("running");
+    ).toBe("runAndShoot");
   });
 });

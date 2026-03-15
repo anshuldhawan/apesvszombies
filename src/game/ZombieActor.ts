@@ -16,7 +16,6 @@ import { applyBulletDamage, ZOMBIE_STARTING_HEALTH } from "./combat";
 import type { ZombieMode, ZombieState } from "./types";
 
 export const ZOMBIE_TARGET_HEIGHT = 1.15;
-const ZOMBIE_FACING_OFFSET = Math.PI;
 
 export interface ZombieTemplate {
   scene: Group;
@@ -120,7 +119,7 @@ export class ZombieActor {
       return;
     }
 
-    this.root.rotation.y = Math.atan2(direction.x, direction.z) + ZOMBIE_FACING_OFFSET;
+    this.root.rotation.y = Math.atan2(direction.x, direction.z);
   }
 
   update(deltaSeconds: number): void {

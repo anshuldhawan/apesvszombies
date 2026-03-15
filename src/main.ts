@@ -10,7 +10,7 @@ import type {
   WorldDefinition
 } from "./game/types";
 
-class ApeVsAliensApp {
+class NeverDeadApp {
   private readonly root: HTMLElement;
   private readonly session: SessionState = {
     playerText: "",
@@ -33,6 +33,7 @@ class ApeVsAliensApp {
   private readonly scoreTag = document.createElement("div");
   private readonly zombiesTag = document.createElement("div");
   private readonly hudToolbar = document.createElement("div");
+  private readonly quitLevelButton = document.createElement("button");
   private readonly thirdPersonButton = document.createElement("button");
   private readonly debugButton = document.createElement("button");
   private readonly debugReadout = document.createElement("div");
@@ -76,6 +77,7 @@ class ApeVsAliensApp {
     this.scoreTag.className = "hud-pill";
     this.zombiesTag.className = "hud-pill";
     this.hudToolbar.className = "hud-toolbar";
+    this.quitLevelButton.className = "hud-button";
     this.thirdPersonButton.className = "hud-button";
     this.debugButton.className = "hud-button";
     this.debugReadout.className = "debug-readout";
@@ -87,9 +89,9 @@ class ApeVsAliensApp {
     menuCard.className = "menu-card";
     menuCard.innerHTML = `
       <span class="eyebrow">Spark + Three FPS Prototype</span>
-      <h1 class="menu-title">Ape Vs Aliens</h1>
+      <h1 class="menu-title">Never dead</h1>
       <p class="menu-copy">
-        Pick a world from the asset folder, then drop into a first-person splat arena with the ape rig driving movement and combat states.
+        Pick a world from the asset folder, then drop into a first-person splat arena with a camera-mounted weapon view driving the action.
       </p>
       <label class="field-label" for="player-text">Textbox input</label>
     `;
@@ -118,6 +120,15 @@ class ApeVsAliensApp {
       this.zombiesTag,
       this.playerTag
     );
+    this.quitLevelButton.type = "button";
+    this.quitLevelButton.textContent = "Quit Level";
+    this.quitLevelButton.addEventListener("click", () => {
+      if (this.state.kind !== "playing") {
+        return;
+      }
+
+      this.backToMenu();
+    });
     this.thirdPersonButton.type = "button";
     this.thirdPersonButton.addEventListener("click", () => {
       if (!this.game || this.state.kind !== "playing" || this.combatHudState.gameOver) {
@@ -149,7 +160,12 @@ class ApeVsAliensApp {
       this.backToMenu();
     });
 
-    this.hudToolbar.append(this.thirdPersonButton, this.debugButton, this.debugReadout);
+    this.hudToolbar.append(
+      this.quitLevelButton,
+      this.thirdPersonButton,
+      this.debugButton,
+      this.debugReadout
+    );
     this.hud.append(this.damageFlash, hudBand, this.hudToolbar, this.crosshair, this.statusNote);
 
     this.shell.append(this.stage, this.menu, this.overlay, this.hud);
@@ -298,7 +314,7 @@ class ApeVsAliensApp {
       case "loading":
         this.overlayTitle.textContent = `Loading ${this.state.world.label}`;
         this.overlayCopy.textContent =
-          "Parsing the selected SPZ splat world, preparing the matching GLB collision mesh, rigging the ape hero, and spawning zombies.";
+          "Parsing the selected SPZ splat world, preparing the matching GLB collision mesh, mounting the first-person view mesh, and spawning zombies.";
         this.overlayActions.style.display = "none";
         break;
     }
@@ -318,6 +334,8 @@ class ApeVsAliensApp {
     this.playerTag.style.display = this.session.playerText ? "" : "none";
     this.thirdPersonButton.textContent =
       this.debugCameraInfo.mode === "thirdPerson" ? "First Person" : "Third Person";
+    this.quitLevelButton.style.display =
+      activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver ? "" : "none";
     this.thirdPersonButton.style.display =
       activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver
         ? ""
@@ -338,8 +356,8 @@ class ApeVsAliensApp {
       : this.debugCameraInfo.enabled
       ? "Debug view is active. Drag to orbit, scroll to zoom, and click the button again to return to gameplay."
       : this.debugCameraInfo.mode === "thirdPerson"
-      ? "Third-person camera is active for chase-view debugging. Click First Person to return to the ape view, or use Debug View for the free orbit camera."
-      : `Use WASD to move, ArrowLeft and ArrowRight to turn, Space to jump, ArrowDown to crouch-walk, ArrowUp to shoot, survive ${ZOMBIE_COUNT} zombies, and press Escape to return to the world list.`;
+      ? "Third-person camera is active for chase-view debugging. The player view mesh stays first-person only, so no avatar is shown from this camera. Use Debug View for the free orbit camera."
+      : `Use WASD to move, Arrow keys to aim, Space to jump, Option to shoot, and survive ${ZOMBIE_COUNT} zombies with the first-person weapon view locked to the camera.`;
   }
 
   private toggleWorldButtons(disabled: boolean): void {
@@ -405,4 +423,4 @@ if (!root) {
   throw new Error("Missing #app root element.");
 }
 
-new ApeVsAliensApp(root);
+new NeverDeadApp(root);

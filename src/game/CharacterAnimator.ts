@@ -1,33 +1,5 @@
-import {
-  AnimationAction,
-  AnimationClip,
-  AnimationMixer,
-  Box3,
-  Group,
-  LoopOnce,
-  LoopRepeat,
-  Object3D,
-  Vector3
-} from "three";
+import { Box3, Group, Object3D, Vector3 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-
-import { resolveAnimationState } from "./animation-state";
-import type { AnimationState } from "./types";
-
-const TARGET_MODEL_HEIGHT = 1.02;
-const HERO_LAYER = 1;
-
-const CLIP_MAP: Record<AnimationState, string> = {
-  idle: "Walking",
-  running: "Running",
-  runAndShoot: "Run_and_Shoot",
-  jumping: "Regular_Jump",
-  crouchWalk: "Crouch_Walk_Left_with_Gun_inplace"
-};
-
-interface CharacterAnimatorOptions {
-  modelUrl: string;
-}
 
 export interface CharacterPoseInput {
   isMoving: boolean;
@@ -36,206 +8,65 @@ export interface CharacterPoseInput {
   isCrouching: boolean;
 }
 
+const FIRST_PERSON_VIEW_LAYER = 1;
+const FIRST_PERSON_VIEW_SCALE = 0.45;
+const FIRST_PERSON_VIEW_X = 0.32;
+const FIRST_PERSON_VIEW_Y = -0.26;
+const FIRST_PERSON_VIEW_Z = -0.82;
+
+interface CharacterAnimatorOptions {
+  modelUrl: string;
+}
+
 export class CharacterAnimator {
   readonly root: Group;
 
-  private readonly mixer: AnimationMixer;
-  private readonly actions = new Map<AnimationState, AnimationAction>();
-  private readonly headAnchor: Object3D | null;
-  private readonly viewAnchor: Object3D | null;
-  private readonly headReference = new Vector3();
-  private readonly viewReference = new Vector3();
-  private readonly headWorld = new Vector3();
-  private readonly headLocal = new Vector3();
-  private readonly viewWorld = new Vector3();
-  private readonly viewLocal = new Vector3();
-  private currentState: AnimationState = "idle";
-
-  private constructor(
-    root: Group,
-    mixer: AnimationMixer,
-    headAnchor: Object3D | null,
-    viewAnchor: Object3D | null
-  ) {
+  private constructor(root: Group) {
     this.root = root;
-    this.mixer = mixer;
-    this.headAnchor = headAnchor;
-    this.viewAnchor = viewAnchor;
   }
 
   static async load(options: CharacterAnimatorOptions): Promise<CharacterAnimator> {
     const loader = new GLTFLoader();
     const gltf = await loader.loadAsync(options.modelUrl);
-
     const root = new Group();
     const scene = gltf.scene;
-    scene.updateMatrixWorld(true);
-
-    const size = new Box3().setFromObject(scene).getSize(new Vector3());
-    const scale = size.y > 0 ? TARGET_MODEL_HEIGHT / size.y : 1;
-    scene.scale.setScalar(scale);
-    scene.updateMatrixWorld(true);
-
     const bounds = new Box3().setFromObject(scene);
-    scene.position.y -= bounds.min.y;
-    scene.updateMatrixWorld(true);
+    const center = bounds.getCenter(new Vector3());
 
+    scene.position.copy(center).multiplyScalar(-1);
+    scene.updateMatrixWorld(true);
     scene.traverse((object) => {
-      object.layers.set(HERO_LAYER);
+      object.layers.set(FIRST_PERSON_VIEW_LAYER);
+      object.renderOrder = 10;
+      if ("frustumCulled" in object) {
+        object.frustumCulled = false;
+      }
     });
 
+    root.position.set(FIRST_PERSON_VIEW_X, FIRST_PERSON_VIEW_Y, FIRST_PERSON_VIEW_Z);
+    root.scale.setScalar(FIRST_PERSON_VIEW_SCALE);
     root.add(scene);
 
-    const mixer = new AnimationMixer(scene);
-    const headAnchor =
-      scene.getObjectByName("Head") ??
-      scene.getObjectByName("headfront") ??
-      scene.getObjectByName("head_end") ??
-      null;
-    const viewAnchor = scene.getObjectByName("headfront") ?? headAnchor;
-    const animator = new CharacterAnimator(root, mixer, headAnchor, viewAnchor);
-    animator.bindClips(gltf.animations);
-    animator.setPose({
-      isMoving: false,
-      isShooting: false,
-      isJumping: false,
-      isCrouching: false
-    });
-    animator.update(0);
-    animator.captureHeadReference();
-    animator.captureViewReference();
-
-    return animator;
+    return new CharacterAnimator(root);
   }
 
-  update(deltaSeconds: number): void {
-    this.mixer.update(deltaSeconds);
-  }
+  update(_deltaSeconds: number): void {}
 
-  setYaw(yaw: number): void {
-    this.root.rotation.y = yaw;
-  }
+  setYaw(_yaw: number): void {}
 
   getHeadOffset(target: Vector3): Vector3 {
-    if (!this.headAnchor) {
-      return target.set(0, 0, 0);
-    }
-
-    this.root.updateWorldMatrix(true, true);
-    this.headAnchor.getWorldPosition(this.headWorld);
-    this.headLocal.copy(this.headWorld);
-    this.root.worldToLocal(this.headLocal);
-
-    return target.copy(this.headLocal).sub(this.headReference);
+    return target.set(0, 0, 0);
   }
 
   getViewReference(target: Vector3): Vector3 {
-    return target.copy(this.viewReference);
+    return target.set(0, 0, 0);
   }
 
-  setPose(input: CharacterPoseInput): void {
-    const nextState = resolveAnimationState(input);
-
-    if (nextState === this.currentState) {
-      if (nextState === "idle") {
-        this.holdIdlePose();
-      }
-
-      return;
-    }
-
-    const nextAction = this.actions.get(nextState);
-    const previousAction = this.actions.get(this.currentState);
-
-    if (!nextAction) {
-      return;
-    }
-
-    if (previousAction && previousAction !== nextAction) {
-      previousAction.fadeOut(0.14);
-      previousAction.paused = false;
-      previousAction.enabled = true;
-    }
-
-    nextAction.enabled = true;
-    nextAction.reset();
-    nextAction.paused = false;
-    nextAction.setEffectiveTimeScale(1);
-    nextAction.setEffectiveWeight(1);
-    nextAction.fadeIn(0.14);
-    nextAction.play();
-
-    if (nextState === "jumping") {
-      nextAction.setLoop(LoopOnce, 1);
-      nextAction.clampWhenFinished = true;
-    } else {
-      nextAction.setLoop(LoopRepeat, Infinity);
-      nextAction.clampWhenFinished = false;
-    }
-
-    this.currentState = nextState;
-
-    if (nextState === "idle") {
-      this.holdIdlePose();
-    }
-  }
-
-  private bindClips(clips: AnimationClip[]): void {
-    for (const [state, clipName] of Object.entries(CLIP_MAP) as Array<
-      [AnimationState, string]
-    >) {
-      const clip = clips.find((candidate) => candidate.name === clipName);
-
-      if (!clip) {
-        continue;
-      }
-
-      const action = this.mixer.clipAction(clip);
-      action.enabled = true;
-      action.setEffectiveWeight(0);
-      action.play();
-      this.actions.set(state, action);
-    }
-  }
-
-  private holdIdlePose(): void {
-    const idleAction = this.actions.get("idle");
-
-    if (!idleAction) {
-      return;
-    }
-
-    idleAction.paused = true;
-    idleAction.time = 0;
-    idleAction.setEffectiveWeight(1);
-  }
-
-  private captureHeadReference(): void {
-    if (!this.headAnchor) {
-      return;
-    }
-
-    this.root.updateWorldMatrix(true, true);
-    this.headAnchor.getWorldPosition(this.headWorld);
-    this.headReference.copy(this.headWorld);
-    this.root.worldToLocal(this.headReference);
-  }
-
-  private captureViewReference(): void {
-    if (!this.viewAnchor) {
-      this.viewReference.set(0, 0, 0);
-      return;
-    }
-
-    this.root.updateWorldMatrix(true, true);
-    this.viewAnchor.getWorldPosition(this.viewWorld);
-    this.viewReference.copy(this.viewWorld);
-    this.root.worldToLocal(this.viewReference);
-  }
+  setPose(_input: CharacterPoseInput): void {}
 }
 
 export function getHeroLayer(): number {
-  return HERO_LAYER;
+  return FIRST_PERSON_VIEW_LAYER;
 }
 
 export function getWorldYaw(object: Object3D): number {

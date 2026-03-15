@@ -4,7 +4,6 @@ import {
   Clock,
   Color,
   DirectionalLight,
-  Group,
   MathUtils,
   Mesh,
   MeshBasicMaterial,
@@ -21,25 +20,21 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   BULLET_DAMAGE,
   createInitialCombatHudState,
-  PLAYER_STARTING_HEALTH,
   tickZombieAttack,
   ZOMBIE_ATTACK_INTERVAL,
-  ZOMBIE_COUNT,
-  ZOMBIE_STARTING_HEALTH
+  ZOMBIE_COUNT
 } from "./combat";
 import { CharacterAnimator, getHeroLayer } from "./CharacterAnimator";
 import { CollisionWorld } from "./CollisionWorld";
+import { type GameKey, stepLookPitch, toGameKey } from "./controls";
 import { zombieModelUrl, heroModelUrl } from "./worlds";
 import type { CombatHudState, SessionState, WorldDefinition } from "./types";
 import { ZombieActor, type ZombieTemplate, ZOMBIE_TARGET_HEIGHT } from "./ZombieActor";
 
 const STAND_HEIGHT = 1.72;
-const CROUCH_HEIGHT = 1.1;
 const STAND_EYE_HEIGHT = 1.56;
-const CROUCH_EYE_HEIGHT = 1.0;
 const PLAYER_RADIUS = 0.34;
 const RUN_SPEED = 4.8;
-const CROUCH_SPEED = 2.25;
 const GRAVITY = 22;
 const JUMP_VELOCITY = 8.6;
 const SHOT_INTERVAL = 0.18;
@@ -47,14 +42,12 @@ const IMPACT_LIFETIME_MS = 180;
 const BLOOD_SPLASH_LIFETIME_MS = 320;
 const CAMERA_SMOOTHING = 14;
 const TURN_SPEED = 2.4;
-const HERO_FACING_OFFSET = Math.PI;
-const FIRST_PERSON_FORWARD_OFFSET = 0.02;
+const LOOK_SPEED = 1.2;
 const THIRD_PERSON_DISTANCE = 2.45;
 const THIRD_PERSON_HEIGHT_OFFSET = 0.38;
 const THIRD_PERSON_SHOULDER_OFFSET = 0.44;
 const THIRD_PERSON_LOOK_AHEAD = 4;
 const THIRD_PERSON_COLLISION_PADDING = 0.18;
-const Y_AXIS = new Vector3(0, 1, 0);
 const UP_AXIS = new Vector3(0, 1, 0);
 const ZOMBIE_SPEED = 1.9;
 const ZOMBIE_RADIUS = 0.26;
@@ -70,17 +63,6 @@ const ZOMBIE_GROUND_RAY_HEIGHT = 8;
 const ZOMBIE_FACING_IDLE = new Vector3(0, 0, -1);
 const BLOOD_PARTICLE_COUNT = 7;
 const BLOOD_GRAVITY = 7;
-
-type KeyCode =
-  | "KeyW"
-  | "KeyA"
-  | "KeyS"
-  | "KeyD"
-  | "Space"
-  | "ArrowLeft"
-  | "ArrowRight"
-  | "ArrowDown"
-  | "ArrowUp";
 
 interface EffectMarker {
   mesh: Mesh;
@@ -115,7 +97,6 @@ interface PlayerState {
   height: number;
   eyeHeight: number;
   onGround: boolean;
-  crouching: boolean;
   jumpQueued: boolean;
 }
 
@@ -136,7 +117,7 @@ export class FpsGame {
   private readonly callbacks: GameCallbacks;
   private readonly scene = new Scene();
   private readonly clock = new Clock();
-  private readonly camera = new PerspectiveCamera(75, 1, 0.1, 300);
+  private readonly camera = new PerspectiveCamera(75, 1, 0.01, 300);
   private readonly thirdPersonCamera = new PerspectiveCamera(78, 1, 0.1, 300);
   private readonly debugCamera = new PerspectiveCamera(60, 1, 0.1, 600);
   private readonly renderer = new WebGLRenderer({
@@ -151,10 +132,7 @@ export class FpsGame {
   });
   private readonly orbitControls = new OrbitControls(this.debugCamera, this.renderer.domElement);
   private readonly playerRoot = new Object3D();
-  private readonly heroPivot = new Group();
-  private readonly pressedKeys = new Set<KeyCode>();
-  private readonly headOffset = new Vector3();
-  private readonly cameraReference = new Vector3();
+  private readonly pressedKeys = new Set<GameKey>();
   private readonly movementVector = new Vector3();
   private readonly forwardVector = new Vector3();
   private readonly rightVector = new Vector3();
@@ -185,7 +163,6 @@ export class FpsGame {
     height: STAND_HEIGHT,
     eyeHeight: STAND_EYE_HEIGHT,
     onGround: false,
-    crouching: false,
     jumpQueued: false
   };
 
@@ -201,6 +178,7 @@ export class FpsGame {
   private destroyed = false;
   private cameraBaseX = 0;
   private cameraBaseZ = 0;
+  private lookPitch = 0;
 
   constructor(options: FpsGameOptions) {
     this.container = options.container;
@@ -215,12 +193,9 @@ export class FpsGame {
     this.scene.background = new Color("#05070b");
     this.scene.add(this.playerRoot);
     this.playerRoot.add(this.camera);
-    this.playerRoot.add(this.heroPivot);
     this.scene.add(this.thirdPersonCamera);
     this.scene.add(this.debugCamera);
     this.camera.layers.enable(getHeroLayer());
-    this.thirdPersonCamera.layers.enable(getHeroLayer());
-    this.debugCamera.layers.enable(getHeroLayer());
     this.camera.add(this.spark);
     this.camera.position.set(this.cameraBaseX, this.player.eyeHeight, this.cameraBaseZ);
     this.camera.rotation.set(0, 0, 0);
@@ -260,11 +235,9 @@ export class FpsGame {
 
     this.collisionWorld = collisionWorld;
     this.character = character;
-    character.getViewReference(this.cameraReference);
-    this.cameraReference.applyAxisAngle(Y_AXIS, HERO_FACING_OFFSET);
-    this.cameraBaseX = this.cameraReference.x;
-    this.cameraBaseZ = this.cameraReference.z - FIRST_PERSON_FORWARD_OFFSET;
-    this.heroPivot.add(character.root);
+    this.cameraBaseX = 0;
+    this.cameraBaseZ = 0;
+    this.camera.add(character.root);
 
     this.splatWorld = new SplatMesh({ url: this.world.spzUrl });
     this.splatWorld.position.copy(collisionWorld.rootPosition);
@@ -386,7 +359,7 @@ export class FpsGame {
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent): void => {
-    const code = this.asGameKey(event.code);
+    const code = toGameKey(event.code);
     if (!code) {
       return;
     }
@@ -400,7 +373,7 @@ export class FpsGame {
   };
 
   private readonly handleKeyUp = (event: KeyboardEvent): void => {
-    const code = this.asGameKey(event.code);
+    const code = toGameKey(event.code);
     if (!code) {
       return;
     }
@@ -434,30 +407,22 @@ export class FpsGame {
       return;
     }
 
-    const wantsCrouch = this.pressedKeys.has("ArrowDown");
-    const canStand =
-      wantsCrouch ||
-      !this.collisionWorld.intersectsCapsule(
-        this.player.position,
-        STAND_HEIGHT,
-        PLAYER_RADIUS
-      );
-    this.player.crouching = wantsCrouch || !canStand;
-    this.player.height = this.player.crouching ? CROUCH_HEIGHT : STAND_HEIGHT;
-
-    const targetEyeHeight = this.player.crouching ? CROUCH_EYE_HEIGHT : STAND_EYE_HEIGHT;
-    this.player.eyeHeight = MathUtils.damp(
-      this.player.eyeHeight,
-      targetEyeHeight,
-      CAMERA_SMOOTHING,
-      deltaSeconds
-    );
-
     if (this.pressedKeys.has("ArrowLeft")) {
       this.playerRoot.rotation.y += TURN_SPEED * deltaSeconds;
     }
     if (this.pressedKeys.has("ArrowRight")) {
       this.playerRoot.rotation.y -= TURN_SPEED * deltaSeconds;
+    }
+    if (!this.thirdPersonEnabled) {
+      const lookDirection =
+        (this.pressedKeys.has("ArrowUp") ? 1 : 0) - (this.pressedKeys.has("ArrowDown") ? 1 : 0);
+      this.lookPitch = stepLookPitch(
+        this.lookPitch,
+        lookDirection,
+        deltaSeconds,
+        LOOK_SPEED
+      );
+      this.camera.rotation.set(this.lookPitch, 0, 0);
     }
 
     this.movementVector.set(0, 0, 0);
@@ -474,8 +439,7 @@ export class FpsGame {
       this.movementVector.x += 1;
     }
 
-    const isMoving = this.movementVector.lengthSq() > 0;
-    if (isMoving) {
+    if (this.movementVector.lengthSq() > 0) {
       this.movementVector.normalize();
     }
 
@@ -483,13 +447,12 @@ export class FpsGame {
     this.forwardVector.set(Math.sin(yaw), 0, -Math.cos(yaw));
     this.rightVector.set(Math.cos(yaw), 0, Math.sin(yaw));
 
-    const speed = this.player.crouching ? CROUCH_SPEED : RUN_SPEED;
     const horizontalVelocity = new Vector3()
       .addScaledVector(this.forwardVector, -this.movementVector.z)
       .addScaledVector(this.rightVector, this.movementVector.x);
 
     if (horizontalVelocity.lengthSq() > 0) {
-      horizontalVelocity.normalize().multiplyScalar(speed);
+      horizontalVelocity.normalize().multiplyScalar(RUN_SPEED);
     }
 
     this.player.velocity.x = horizontalVelocity.x;
@@ -524,7 +487,7 @@ export class FpsGame {
       this.player.velocity.y = 0;
     }
 
-    const isShooting = this.pressedKeys.has("ArrowUp");
+    const isShooting = this.pressedKeys.has("Shoot");
     this.shotCooldown -= deltaSeconds;
 
     if (isShooting && this.shotCooldown <= 0) {
@@ -533,14 +496,6 @@ export class FpsGame {
     }
 
     this.updateZombies(deltaSeconds);
-    this.character.setYaw(HERO_FACING_OFFSET);
-    this.character.setPose({
-      isMoving,
-      isShooting,
-      isJumping: !this.player.onGround,
-      isCrouching: this.player.crouching
-    });
-    this.character.update(deltaSeconds);
     this.updatePlayerCameraFromHead(deltaSeconds);
     this.updateThirdPersonCamera(deltaSeconds);
     this.pushDebugCameraUpdate();
@@ -878,25 +833,20 @@ export class FpsGame {
   }
 
   private updatePlayerCameraFromHead(deltaSeconds: number): void {
-    if (!this.character) {
-      this.camera.position.set(this.cameraBaseX, this.player.eyeHeight, this.cameraBaseZ);
-      return;
-    }
-
-    this.character.getHeadOffset(this.headOffset);
     this.camera.position.x = MathUtils.damp(
       this.camera.position.x,
-      this.cameraBaseX + this.headOffset.x,
+      this.cameraBaseX,
       CAMERA_SMOOTHING,
       deltaSeconds
     );
     this.camera.position.y = MathUtils.damp(
       this.camera.position.y,
-      this.player.eyeHeight + this.headOffset.y,
+      this.player.eyeHeight,
       CAMERA_SMOOTHING,
       deltaSeconds
     );
     this.camera.position.z = this.cameraBaseZ;
+    this.camera.rotation.set(this.lookPitch, 0, 0);
   }
 
   private updateThirdPersonCamera(deltaSeconds: number): void {
@@ -978,22 +928,5 @@ export class FpsGame {
     this.shotOrigin.y += Math.max(0.92, this.player.eyeHeight - 0.08);
     this.shotOrigin.addScaledVector(this.shotDirection, 0.58);
     return this.shotOrigin;
-  }
-
-  private asGameKey(code: string): KeyCode | null {
-    switch (code) {
-      case "KeyW":
-      case "KeyA":
-      case "KeyS":
-      case "KeyD":
-      case "Space":
-      case "ArrowLeft":
-      case "ArrowRight":
-      case "ArrowDown":
-      case "ArrowUp":
-        return code;
-      default:
-        return null;
-    }
   }
 }

@@ -3,32 +3,42 @@ import { describe, expect, it } from "vitest";
 import { createWorldDefinitions, formatWorldLabel } from "./world-discovery";
 
 describe("createWorldDefinitions", () => {
-  it("pairs only matching spz and glb assets", () => {
+  it("pairs matching spz assets with exact or collider glbs", () => {
     const worlds = createWorldDefinitions(
       {
         "../../assets/urbanmap.spz": "/urbanmap.spz",
-        "../../assets/urbanmap2.spz": "/urbanmap2.spz",
+        "../../assets/Times Square city street.spz": "/times-square.spz",
+        "../../assets/Industrial Base on Alien Planet.spz": "/industrial-base.spz",
         "../../assets/unmatched.spz": "/unmatched.spz"
       },
       {
         "../../assets/urbanmap.glb": "/urbanmap.glb",
-        "../../assets/urbanmap2.glb": "/urbanmap2.glb",
+        "../../assets/Times Square city street_collider.glb": "/times-square-collider.glb",
+        "../../assets/Industrial Base on Alien Planet.glb": "/industrial-base.glb",
+        "../../assets/Industrial Base on Alien Planet_collider.glb":
+          "/industrial-base-collider.glb",
         "../../assets/ape.glb": "/ape.glb"
       }
     );
 
     expect(worlds).toEqual([
       {
+        id: "Industrial Base on Alien Planet",
+        label: "Industrial Base On Alien Planet",
+        spzUrl: "/industrial-base.spz",
+        collisionGlbUrl: "/industrial-base-collider.glb"
+      },
+      {
+        id: "Times Square city street",
+        label: "Times Square City Street",
+        spzUrl: "/times-square.spz",
+        collisionGlbUrl: "/times-square-collider.glb"
+      },
+      {
         id: "urbanmap",
         label: "Urbanmap",
         spzUrl: "/urbanmap.spz",
         collisionGlbUrl: "/urbanmap.glb"
-      },
-      {
-        id: "urbanmap2",
-        label: "Urbanmap 2",
-        spzUrl: "/urbanmap2.spz",
-        collisionGlbUrl: "/urbanmap2.glb"
       }
     ]);
   });
