@@ -7,6 +7,10 @@ import {
 } from "./combat";
 
 describe("combat rules", () => {
+  it("starts each run with a 10 zombie wave", () => {
+    expect(createInitialCombatHudState().zombiesRemaining).toBe(10);
+  });
+
   it("kills a zombie in five bullet hits and awards score once", () => {
     let health = 50;
     let score = 0;

@@ -6,7 +6,7 @@ export const BULLET_DAMAGE = 10;
 export const ZOMBIE_ATTACK_DAMAGE = 10;
 export const ZOMBIE_ATTACK_INTERVAL = 2;
 export const KILL_SCORE = 100;
-export const ZOMBIE_COUNT = 4;
+export const ZOMBIE_COUNT = 10;
 
 export interface BulletDamageResult {
   nextHealth: number;
