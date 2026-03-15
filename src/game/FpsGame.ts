@@ -59,9 +59,9 @@ const SHOT_INTERVAL = 0.18;
 const IMPACT_LIFETIME_MS = 180;
 const BLOOD_SPLASH_LIFETIME_MS = 320;
 const CAMERA_SMOOTHING = 14;
-const TURN_SPEED = 2.4;
+const TURN_SPEED = 1.2;
 const XR_TURN_SPEED = 2.9;
-const LOOK_SPEED = 1.2;
+const LOOK_SPEED = 0.6;
 const THIRD_PERSON_DISTANCE = 2.45;
 const THIRD_PERSON_HEIGHT_OFFSET = 0.38;
 const THIRD_PERSON_SHOULDER_OFFSET = 0.44;
@@ -84,6 +84,11 @@ const BLOOD_PARTICLE_COUNT = 7;
 const BLOOD_GRAVITY = 7;
 const XR_AIM_DISTANCE = 10;
 const XR_RETICLE_RADIUS = 0.03;
+const MODEL_LOAD_TIMEOUT_MS = 30_000;
+const GENERATED_COLLISION_LOAD_TIMEOUT_MS = 90_000;
+const PRESET_COLLISION_LOAD_TIMEOUT_MS = 60_000;
+const GENERATED_SPLAT_LOAD_TIMEOUT_MS = 90_000;
+const PRESET_SPLAT_LOAD_TIMEOUT_MS = 60_000;
 
 interface EffectMarker {
   mesh: Mesh;
@@ -105,6 +110,7 @@ interface ShotTraceResult {
 }
 
 interface GameCallbacks {
+  onLoadStatusChange: (message: string) => void;
   onReady: () => void;
   onShotFeedback: () => void;
   onPlayerHit: () => void;
@@ -309,6 +315,91 @@ export class FpsGame {
     this.scene.add(keyLight);
   }
 
+  private updateLoadStatus(message: string): void {
+    console.info("[FpsGame] Load status", {
+      worldId: this.world.id,
+      worldLabel: this.world.label,
+      source: this.world.source,
+      message
+    });
+    this.callbacks.onLoadStatusChange(message);
+  }
+
+  private async awaitLoadStage<T>(
+    stage: string,
+    promise: Promise<T>,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<T> {
+    const startedAt = performance.now();
+
+    console.info("[FpsGame] Starting load stage", {
+      stage,
+      worldId: this.world.id,
+      worldLabel: this.world.label,
+      source: this.world.source,
+      timeoutMs
+    });
+
+    try {
+      const result = await withTimeout(promise, timeoutMs, timeoutMessage);
+
+      console.info("[FpsGame] Completed load stage", {
+        stage,
+        worldId: this.world.id,
+        elapsedMs: Math.round(performance.now() - startedAt)
+      });
+
+      return result;
+    } catch (error) {
+      console.error("[FpsGame] Load stage failed", {
+        stage,
+        worldId: this.world.id,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        error
+      });
+      throw error;
+    }
+  }
+
+  private getCoreAssetLoadStatus(): string {
+    return this.world.source === "generated"
+      ? "Loading the generated collision mesh, first-person rig, and zombie template."
+      : "Loading the selected collision mesh, first-person rig, and zombie template.";
+  }
+
+  private getCoreAssetTimeoutMessage(stage: "collision" | "hero" | "zombie"): string {
+    if (stage === "collision") {
+      return this.world.source === "generated"
+        ? "Timed out while building the generated collision mesh. Try Generate & Play again to get a lighter collider."
+        : "Timed out while building the selected collision mesh.";
+    }
+
+    if (stage === "hero") {
+      return "Timed out while loading the first-person rig.";
+    }
+
+    return "Timed out while loading the zombie template.";
+  }
+
+  private getSplatLoadStatus(): string {
+    return this.world.source === "generated"
+      ? "Decoding the generated splat scene for real-time shooter gameplay."
+      : "Decoding the selected splat scene for real-time shooter gameplay.";
+  }
+
+  private getSplatLoadTimeoutMs(): number {
+    return this.world.source === "generated"
+      ? GENERATED_SPLAT_LOAD_TIMEOUT_MS
+      : PRESET_SPLAT_LOAD_TIMEOUT_MS;
+  }
+
+  private getSplatLoadTimeoutMessage(): string {
+    return this.world.source === "generated"
+      ? "Timed out while decoding the generated World Labs splat scene. Try Generate & Play again for a different map."
+      : "Timed out while decoding the selected SPZ splat world.";
+  }
+
   async load(): Promise<void> {
     this.container.innerHTML = "";
     this.container.append(this.renderer.domElement);
@@ -318,10 +409,28 @@ export class FpsGame {
     window.addEventListener("keyup", this.handleKeyUp);
     void this.refreshXrAvailability();
 
+    this.updateLoadStatus(this.getCoreAssetLoadStatus());
     const [collisionWorld, character, zombieTemplate] = await Promise.all([
-      CollisionWorld.load(this.world.collisionGlbUrl),
-      CharacterAnimator.load({ modelUrl: heroModelUrl }),
-      ZombieActor.loadTemplate(zombieModelUrl)
+      this.awaitLoadStage(
+        "collision-world",
+        CollisionWorld.load(this.world.collisionGlbUrl),
+        this.world.source === "generated"
+          ? GENERATED_COLLISION_LOAD_TIMEOUT_MS
+          : PRESET_COLLISION_LOAD_TIMEOUT_MS,
+        this.getCoreAssetTimeoutMessage("collision")
+      ),
+      this.awaitLoadStage(
+        "hero-rig",
+        CharacterAnimator.load({ modelUrl: heroModelUrl }),
+        MODEL_LOAD_TIMEOUT_MS,
+        this.getCoreAssetTimeoutMessage("hero")
+      ),
+      this.awaitLoadStage(
+        "zombie-template",
+        ZombieActor.loadTemplate(zombieModelUrl),
+        MODEL_LOAD_TIMEOUT_MS,
+        this.getCoreAssetTimeoutMessage("zombie")
+      )
     ]);
 
     if (this.destroyed) {
@@ -335,6 +444,7 @@ export class FpsGame {
     this.cameraBaseZ = 0;
     this.camera.add(character.root);
 
+    this.updateLoadStatus(this.getSplatLoadStatus());
     this.splatWorld = new SplatMesh({ url: this.world.spzUrl });
     this.splatWorld.position.copy(collisionWorld.rootPosition);
     this.splatWorld.quaternion.copy(collisionWorld.rootQuaternion);
@@ -342,8 +452,14 @@ export class FpsGame {
     this.scene.add(this.splatWorld);
     this.scene.add(collisionWorld.mesh);
 
-    await this.splatWorld.initialized;
+    await this.awaitLoadStage(
+      "splat-world",
+      this.splatWorld.initialized,
+      this.getSplatLoadTimeoutMs(),
+      this.getSplatLoadTimeoutMessage()
+    );
 
+    this.updateLoadStatus("Picking a spawn point and placing the zombie wave.");
     const spawnPoint = collisionWorld.getSpawnPoint(STAND_HEIGHT, this.world.spawnOffset);
     this.player.position.copy(spawnPoint);
     this.playerRoot.position.copy(spawnPoint);
@@ -373,6 +489,8 @@ export class FpsGame {
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     this.collisionWorld?.destroy();
+    this.splatWorld?.dispose();
+    this.splatWorld?.removeFromParent();
     this.impactGeometry.dispose();
     this.impactMaterial.dispose();
     this.bloodGeometry.dispose();
@@ -392,6 +510,9 @@ export class FpsGame {
       zombie.destroy();
     }
     this.zombies = [];
+    this.splatWorld = null;
+    this.collisionWorld = null;
+    this.character = null;
   }
 
   async enterVr(): Promise<void> {
@@ -1513,4 +1634,23 @@ export class FpsGame {
   private isXrPresenting(): boolean {
     return this.renderer.xr.isPresenting;
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }

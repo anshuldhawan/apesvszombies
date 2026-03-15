@@ -27,9 +27,12 @@ class NeverDeadApp {
   private readonly overlayCard = document.createElement("div");
   private readonly overlayTitle = document.createElement("h2");
   private readonly overlayCopy = document.createElement("p");
+  private readonly overlayDetails = document.createElement("p");
   private readonly overlayActions = document.createElement("div");
   private readonly restartButton = document.createElement("button");
   private readonly backButton = document.createElement("button");
+  private readonly retryGenerationButton = document.createElement("button");
+  private readonly marbleLink = document.createElement("a");
   private readonly hud = document.createElement("div");
   private readonly worldTag = document.createElement("div");
   private readonly playerTag = document.createElement("div");
@@ -74,11 +77,18 @@ class NeverDeadApp {
     this.overlayCard.className = "overlay-card";
     this.overlayTitle.className = "overlay-title";
     this.overlayCopy.className = "overlay-copy";
+    this.overlayDetails.className = "overlay-details";
     this.overlayActions.className = "overlay-actions";
     this.restartButton.className = "button-primary";
     this.restartButton.textContent = "Restart Same Map";
     this.backButton.className = "button-secondary";
     this.backButton.textContent = "Back To Worlds";
+    this.retryGenerationButton.className = "button-primary";
+    this.retryGenerationButton.textContent = "Try Again";
+    this.marbleLink.className = "button-secondary button-link";
+    this.marbleLink.textContent = "Open In Marble";
+    this.marbleLink.target = "_blank";
+    this.marbleLink.rel = "noreferrer";
     this.hud.className = "hud";
     this.worldTag.className = "hud-pill";
     this.playerTag.className = "hud-pill";
@@ -98,10 +108,6 @@ class NeverDeadApp {
     const menuCard = document.createElement("div");
     menuCard.className = "menu-card";
     menuCard.innerHTML = `
-      <span class="eyebrow">Spark + Three FPS Prototype</span>
-      <p class="menu-copy">
-        Type a location to generate a World Labs shooter arena, or jump straight into one of the preset splat worlds from the asset folder.
-      </p>
       <label class="field-label" for="player-text">Where do you want to play?</label>
     `;
 
@@ -135,8 +141,12 @@ class NeverDeadApp {
     menuCard.append(this.menuError, this.inputRow, this.worldGrid);
     this.menu.append(menuCard);
 
-    this.overlayCard.append(this.overlayTitle, this.overlayCopy, this.overlayActions);
-    this.overlayActions.append(this.restartButton, this.backButton);
+    this.overlayCard.append(
+      this.overlayTitle,
+      this.overlayCopy,
+      this.overlayDetails,
+      this.overlayActions
+    );
     this.overlay.append(this.overlayCard);
 
     const hudBand = document.createElement("div");
@@ -200,6 +210,9 @@ class NeverDeadApp {
     });
     this.backButton.addEventListener("click", () => {
       this.backToMenu();
+    });
+    this.retryGenerationButton.addEventListener("click", () => {
+      void this.generateAndPlayWorld();
     });
 
     this.hudToolbar.append(
@@ -283,35 +296,73 @@ class NeverDeadApp {
     this.state = {
       kind: "requesting",
       location,
-      statusMessage: "Sending your prompt to World Labs."
+      statusMessage: "Sending your prompt to World Labs.",
+      attempt: 1
     };
     this.render();
 
     try {
-      const world = await generateWorldFromLocation(location, {
+      const result = await generateWorldFromLocation(location, {
         onProgress: (progress) => {
-          if (progress.phase === "requesting") {
-            this.state = {
-              kind: "requesting",
-              location,
-              statusMessage: progress.message
-            };
-          } else {
-            this.state = {
-              kind: "polling",
-              location,
-              statusMessage: progress.message,
-              operationId: progress.operationId
-            };
+          switch (progress.phase) {
+            case "requesting":
+              this.state = {
+                kind: "requesting",
+                location,
+                statusMessage: progress.message,
+                attempt: progress.attempt
+              };
+              break;
+            case "retrying":
+              this.state = {
+                kind: "retrying",
+                location,
+                statusMessage: progress.message,
+                attempt: progress.attempt
+              };
+              break;
+            case "polling":
+              this.state = {
+                kind: "polling",
+                location,
+                statusMessage: progress.message,
+                operationId: progress.operationId,
+                attempt: progress.attempt,
+                elapsedMs: progress.elapsedMs,
+                source: progress.source
+              };
+              break;
           }
 
           this.render();
         }
       });
 
-      this.generatedWorlds = rememberGeneratedWorld(this.generatedWorlds, world);
+      if (result.kind === "failed") {
+        if (result.code === "assets_unavailable") {
+          this.state = {
+            kind: "generationFailed",
+            location,
+            reason: result.reason,
+            worldId: result.worldId,
+            operationId: result.operationId,
+            worldMarbleUrl: result.worldMarbleUrl,
+            assetSummary: result.assetSummary,
+            attemptCount: result.attemptCount
+          };
+          this.render();
+          return;
+        }
+
+        this.menuErrorMessage = result.reason;
+        this.state = { kind: "menu" };
+        this.render();
+        return;
+      }
+
+      this.generatedWorlds = rememberGeneratedWorld(this.generatedWorlds, result.world);
       this.renderWorldButtons();
-      await this.startWorld(world);
+      await this.startWorld(result.world);
     } catch (error) {
       console.error(error);
       this.menuErrorMessage =
@@ -329,7 +380,14 @@ class NeverDeadApp {
     this.session.selectedWorldId = world.id;
     this.destroyGame();
 
-    this.state = { kind: "loading", world };
+    this.state = {
+      kind: "loading",
+      world,
+      statusMessage:
+        world.source === "generated"
+          ? "World Labs finished the map. Loading the generated collision mesh, shooter camera rig, and zombie wave."
+          : "Loading the selected splat world, collision mesh, first-person rig, and zombie wave."
+    };
     this.render();
 
     const game = new FpsGame({
@@ -337,6 +395,18 @@ class NeverDeadApp {
       world,
       session: this.session,
       callbacks: {
+        onLoadStatusChange: (statusMessage) => {
+          if (this.state.kind !== "loading" || this.state.world.id !== world.id) {
+            return;
+          }
+
+          this.state = {
+            kind: "loading",
+            world,
+            statusMessage
+          };
+          this.render();
+        },
         onReady: () => {
           this.debugCameraInfo = this.game?.getDebugCameraInfo() ?? this.debugCameraInfo;
           this.xrState = this.game?.getXrState() ?? this.xrState;
@@ -378,7 +448,9 @@ class NeverDeadApp {
       console.error(error);
       this.destroyGame();
       this.menuErrorMessage =
-        "This world failed to initialize. Check the browser console and try another world.";
+        error instanceof Error
+          ? error.message
+          : "This world failed to initialize. Check the browser console and try another world.";
       this.state = { kind: "menu" };
       this.render();
     }
@@ -406,10 +478,17 @@ class NeverDeadApp {
   }
 
   private render(): void {
-    const menuVisible = this.state.kind === "menu" || this.state.kind === "requesting" || this.state.kind === "polling";
+    const menuVisible =
+      this.state.kind === "menu" ||
+      this.state.kind === "requesting" ||
+      this.state.kind === "retrying" ||
+      this.state.kind === "polling" ||
+      this.state.kind === "generationFailed";
     const overlayVisible =
       this.state.kind === "requesting" ||
+      this.state.kind === "retrying" ||
       this.state.kind === "polling" ||
+      this.state.kind === "generationFailed" ||
       this.state.kind === "loading" ||
       this.combatHudState.gameOver;
 
@@ -418,10 +497,11 @@ class NeverDeadApp {
     this.hud.classList.toggle("visible", this.state.kind === "playing");
     this.menuError.textContent = this.menuErrorMessage ?? "";
     this.menuError.hidden = !this.menuErrorMessage;
-    this.generateButton.textContent =
-      this.state.kind === "requesting" || this.state.kind === "polling"
-        ? "Generating..."
-        : "Generate & Play";
+    this.generateButton.textContent = this.isMenuBusy()
+      ? this.state.kind === "retrying"
+        ? "Retrying..."
+        : "Generating..."
+      : "Generate & Play";
     this.playerInput.disabled = this.isMenuBusy();
     this.generateButton.disabled = this.isMenuBusy();
     this.renderOverlay();
@@ -430,6 +510,9 @@ class NeverDeadApp {
   }
 
   private renderOverlay(): void {
+    this.setOverlayDetails(null);
+    this.setOverlayActions();
+
     switch (this.state.kind) {
       case "menu":
         this.overlay.classList.remove("visible");
@@ -437,14 +520,40 @@ class NeverDeadApp {
       case "requesting":
         this.overlayTitle.textContent = `Generating ${this.state.location}`;
         this.overlayCopy.textContent = this.state.statusMessage;
-        this.overlayActions.style.display = "none";
+        return;
+      case "retrying":
+        this.overlayTitle.textContent = `Retrying ${this.state.location}`;
+        this.overlayCopy.textContent = this.state.statusMessage;
         return;
       case "polling":
-        this.overlayTitle.textContent = `Generating ${this.state.location}`;
+        this.overlayTitle.textContent =
+          this.state.attempt > 1 ? `Retrying ${this.state.location}` : `Generating ${this.state.location}`;
         this.overlayCopy.textContent = this.state.operationId
           ? `${this.state.statusMessage} Operation: ${this.state.operationId}.`
           : this.state.statusMessage;
-        this.overlayActions.style.display = "none";
+        return;
+      case "generationFailed":
+        this.overlayTitle.textContent = `Unable To Start ${this.state.location}`;
+        this.overlayCopy.textContent =
+          "World Labs generated the splat world but did not provide a collider mesh, so shooter mode cannot start.";
+        this.setOverlayDetails(
+          [
+            `Attempts: ${this.state.attemptCount}`,
+            this.state.worldId ? `World ID: ${this.state.worldId}` : null,
+            this.state.operationId ? `Operation ID: ${this.state.operationId}` : null,
+            `Reason: ${this.state.reason}`,
+            `Last snapshot: ${this.state.assetSummary}`
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n")
+        );
+        if (this.state.worldMarbleUrl) {
+          this.marbleLink.href = this.state.worldMarbleUrl;
+          this.setOverlayActions(this.retryGenerationButton, this.backButton, this.marbleLink);
+        } else {
+          this.marbleLink.removeAttribute("href");
+          this.setOverlayActions(this.retryGenerationButton, this.backButton);
+        }
         return;
       case "playing":
         if (!this.combatHudState.gameOver) {
@@ -454,17 +563,23 @@ class NeverDeadApp {
 
         this.overlayTitle.textContent = "Game Over";
         this.overlayCopy.textContent = `The zombies got you. Final score: ${this.combatHudState.score}. Health: ${this.combatHudState.playerHealth}.`;
-        this.overlayActions.style.display = "flex";
+        this.setOverlayActions(this.restartButton, this.backButton);
         return;
       case "loading":
         this.overlayTitle.textContent = `Loading ${this.state.world.label}`;
-        this.overlayCopy.textContent =
-          this.state.world.source === "generated"
-            ? "World Labs finished the map. Preparing the splat scene, collision mesh, first-person view, and zombie wave."
-            : "Parsing the selected SPZ splat world, preparing the matching GLB collision mesh, mounting the first-person view mesh, and spawning zombies.";
-        this.overlayActions.style.display = "none";
-        break;
+        this.overlayCopy.textContent = this.state.statusMessage;
+        return;
     }
+  }
+
+  private setOverlayDetails(text: string | null): void {
+    this.overlayDetails.textContent = text ?? "";
+    this.overlayDetails.hidden = !text;
+  }
+
+  private setOverlayActions(...actions: HTMLElement[]): void {
+    this.overlayActions.replaceChildren(...actions);
+    this.overlayActions.style.display = actions.length > 0 ? "flex" : "none";
   }
 
   private renderHud(): void {
@@ -536,6 +651,7 @@ class NeverDeadApp {
   private isMenuBusy(): boolean {
     return (
       this.state.kind === "requesting" ||
+      this.state.kind === "retrying" ||
       this.state.kind === "polling" ||
       this.state.kind === "loading"
     );

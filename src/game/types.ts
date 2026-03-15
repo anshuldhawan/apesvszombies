@@ -43,9 +43,28 @@ export interface XrSessionState {
 
 export type AppState =
   | { kind: "menu" }
-  | { kind: "requesting"; location: string; statusMessage: string }
-  | { kind: "polling"; location: string; statusMessage: string; operationId: string | null }
-  | { kind: "loading"; world: WorldDefinition }
+  | { kind: "requesting"; location: string; statusMessage: string; attempt: number }
+  | { kind: "retrying"; location: string; statusMessage: string; attempt: number }
+  | {
+      kind: "polling";
+      location: string;
+      statusMessage: string;
+      operationId: string | null;
+      attempt: number;
+      elapsedMs: number;
+      source: "operation" | "world";
+    }
+  | {
+      kind: "generationFailed";
+      location: string;
+      reason: string;
+      worldId: string | null;
+      operationId: string | null;
+      worldMarbleUrl?: string;
+      assetSummary: string;
+      attemptCount: number;
+    }
+  | { kind: "loading"; world: WorldDefinition; statusMessage: string }
   | { kind: "playing"; world: WorldDefinition };
 
 export type AnimationState =
