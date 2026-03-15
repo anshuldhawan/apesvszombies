@@ -1,8 +1,8 @@
 import type { CombatHudState } from "./types";
 
 export const PLAYER_STARTING_HEALTH = 100;
-export const ZOMBIE_STARTING_HEALTH = 50;
 export const BULLET_DAMAGE = 10;
+export const ZOMBIE_STARTING_HEALTH = BULLET_DAMAGE;
 export const ZOMBIE_ATTACK_DAMAGE = 10;
 export const ZOMBIE_ATTACK_INTERVAL = 2;
 export const KILL_SCORE = 100;

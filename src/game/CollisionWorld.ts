@@ -17,6 +17,7 @@ import {
 } from "three-mesh-bvh";
 
 import { planSpawnPoints } from "./spawn-logic";
+import type { WorldSpawnOffset } from "./types";
 
 (BufferGeometry.prototype as BufferGeometry & {
   computeBoundsTree?: typeof computeBoundsTree;
@@ -134,15 +135,19 @@ export class CollisionWorld {
     this.mesh.geometry.dispose();
   }
 
-  getSpawnPoint(playerHeight: number): Vector3 {
+  getSpawnPoint(playerHeight: number, offset?: WorldSpawnOffset): Vector3 {
     const center = this.bounds.getCenter(new Vector3());
-    const hit = this.projectPointToGround(center.x, center.z);
+    const x = center.x + (offset?.x ?? 0);
+    const z = center.z + (offset?.z ?? 0);
+    const y = offset?.y ?? 0;
+    const hit = this.projectPointToGround(x, z);
 
     if (hit) {
+      hit.y += y;
       return hit;
     }
 
-    return new Vector3(center.x, this.bounds.max.y + playerHeight, center.z);
+    return new Vector3(x, this.bounds.max.y + playerHeight + y, z);
   }
 
   getRandomSpawnPoints(

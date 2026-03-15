@@ -18,6 +18,15 @@ describe("createWorldDefinitions", () => {
         "../../assets/Industrial Base on Alien Planet_collider.glb":
           "/industrial-base-collider.glb",
         "../../assets/ape.glb": "/ape.glb"
+      },
+      {
+        "Times Square city street": {
+          initialYaw: Math.PI / 2,
+          spawnOffset: {
+            x: -3,
+            z: 0
+          }
+        }
       }
     );
 
@@ -26,19 +35,27 @@ describe("createWorldDefinitions", () => {
         id: "Industrial Base on Alien Planet",
         label: "Industrial Base On Alien Planet",
         spzUrl: "/industrial-base.spz",
-        collisionGlbUrl: "/industrial-base-collider.glb"
+        collisionGlbUrl: "/industrial-base-collider.glb",
+        source: "preset"
       },
       {
         id: "Times Square city street",
         label: "Times Square City Street",
         spzUrl: "/times-square.spz",
-        collisionGlbUrl: "/times-square-collider.glb"
+        collisionGlbUrl: "/times-square-collider.glb",
+        source: "preset",
+        initialYaw: Math.PI / 2,
+        spawnOffset: {
+          x: -3,
+          z: 0
+        }
       },
       {
         id: "urbanmap",
         label: "Urbanmap",
         spzUrl: "/urbanmap.spz",
-        collisionGlbUrl: "/urbanmap.glb"
+        collisionGlbUrl: "/urbanmap.glb",
+        source: "preset"
       }
     ]);
   });

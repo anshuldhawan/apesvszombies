@@ -1,6 +1,10 @@
 import type { WorldDefinition } from "./types";
 
 export type AssetModuleMap = Record<string, string>;
+export type WorldDefinitionOverrides = Record<
+  string,
+  Partial<Pick<WorldDefinition, "initialYaw" | "spawnOffset">>
+>;
 const COLLIDER_SUFFIX = "_collider";
 
 function basename(path: string): string {
@@ -36,7 +40,8 @@ function getCollisionAssetId(path: string): { id: string; explicitCollider: bool
 
 export function createWorldDefinitions(
   spzModules: AssetModuleMap,
-  glbModules: AssetModuleMap
+  glbModules: AssetModuleMap,
+  overrides: WorldDefinitionOverrides = {}
 ): WorldDefinition[] {
   const glbByBase = new Map<string, { url: string; explicitCollider: boolean }>();
 
@@ -65,7 +70,9 @@ export function createWorldDefinitions(
         id,
         label: formatWorldLabel(id),
         spzUrl,
-        collisionGlbUrl
+        collisionGlbUrl,
+        source: "preset",
+        ...overrides[id]
       };
     })
     .filter((world): world is WorldDefinition => Boolean(world))

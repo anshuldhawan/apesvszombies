@@ -1,10 +1,11 @@
 :root {
   color-scheme: dark;
   font-family: "Trebuchet MS", "Avenir Next", "Segoe UI", sans-serif;
-  background:
-    radial-gradient(circle at top, rgba(255, 170, 58, 0.18), transparent 40%),
-    radial-gradient(circle at bottom, rgba(83, 163, 255, 0.18), transparent 38%),
-    #090c12;
+  --page-glow:
+    radial-gradient(circle at 18% 10%, rgba(255, 196, 89, 0.18), transparent 28%),
+    radial-gradient(circle at 82% 18%, rgba(133, 197, 255, 0.2), transparent 34%);
+  --page-overlay: linear-gradient(180deg, rgba(7, 10, 16, 0.18), rgba(5, 7, 11, 0.78));
+  background: #090c12;
   color: #f7efe3;
 }
 
@@ -23,9 +24,10 @@ body,
 
 body {
   background:
-    radial-gradient(circle at 20% 0%, rgba(255, 196, 89, 0.25), transparent 32%),
-    radial-gradient(circle at 100% 100%, rgba(69, 123, 255, 0.2), transparent 35%),
-    linear-gradient(180deg, #141723 0%, #090c12 55%, #05070b 100%);
+    var(--page-glow),
+    var(--page-overlay),
+    url("../assets/homepage-background.png") center center / cover no-repeat,
+    #090c12;
 }
 
 button,
@@ -129,7 +131,6 @@ input {
 
 .player-input {
   width: 100%;
-  margin-bottom: 24px;
   padding: 16px 18px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 18px;
@@ -141,6 +142,18 @@ input {
 .player-input:focus {
   border-color: rgba(255, 196, 89, 0.6);
   box-shadow: 0 0 0 4px rgba(255, 196, 89, 0.12);
+}
+
+.player-input:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
+.input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  margin-bottom: 24px;
 }
 
 .world-grid {
@@ -176,9 +189,30 @@ input {
     rgba(255, 255, 255, 0.04);
 }
 
+.world-button.generated {
+  border-color: rgba(255, 196, 89, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 196, 89, 0.08), transparent 60%),
+    rgba(255, 255, 255, 0.03);
+}
+
 .world-button:disabled {
   cursor: progress;
   opacity: 0.72;
+}
+
+.world-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(255, 196, 89, 0.14);
+  color: #ffd697;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .world-label {
@@ -264,10 +298,21 @@ input {
   font-weight: 700;
 }
 
+.button-primary:disabled,
+.button-secondary:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
 .button-secondary {
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.04);
   color: inherit;
+}
+
+.generate-button {
+  min-width: 180px;
+  white-space: nowrap;
 }
 
 .hud {
@@ -328,6 +373,11 @@ input {
 .hud-button:hover,
 .hud-button:focus-visible {
   border-color: rgba(255, 196, 89, 0.5);
+}
+
+.hud-button:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
 }
 
 .debug-readout {
@@ -423,6 +473,14 @@ input {
 
   .world-grid {
     grid-template-columns: 1fr;
+  }
+
+  .input-row {
+    grid-template-columns: 1fr;
+  }
+
+  .generate-button {
+    width: 100%;
   }
 
   .status-note {

@@ -11,20 +11,15 @@ describe("combat rules", () => {
     expect(createInitialCombatHudState().zombiesRemaining).toBe(10);
   });
 
-  it("kills a zombie in five bullet hits and awards score once", () => {
-    let health = 50;
+  it("kills a zombie in one bullet hit and awards score once", () => {
+    let health = 10;
     let score = 0;
-    let killed = false;
-
-    for (let hit = 0; hit < 5; hit += 1) {
-      const result = applyBulletDamage(health, 10);
-      health = result.nextHealth;
-      score += result.scoreDelta;
-      killed = result.killed;
-    }
+    const result = applyBulletDamage(health, 10);
+    health = result.nextHealth;
+    score += result.scoreDelta;
 
     expect(health).toBe(0);
-    expect(killed).toBe(true);
+    expect(result.killed).toBe(true);
     expect(score).toBe(100);
 
     const extraHit = applyBulletDamage(health, 10);

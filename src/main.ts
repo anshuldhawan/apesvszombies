@@ -2,12 +2,16 @@ import "./styles.css";
 
 import { createInitialCombatHudState, ZOMBIE_COUNT } from "./game/combat";
 import { FpsGame, type DebugCameraInfo } from "./game/FpsGame";
+import { buildMenuWorlds, rememberGeneratedWorld } from "./game/world-menu";
+import { generateWorldFromLocation, normalizeLocationInput } from "./game/worldlabs";
 import { worldDefinitions } from "./game/worlds";
+import { createUncheckedXrSessionState } from "./game/xr";
 import type {
   AppState,
   CombatHudState,
   SessionState,
-  WorldDefinition
+  WorldDefinition,
+  XrSessionState
 } from "./game/types";
 
 class NeverDeadApp {
@@ -34,6 +38,7 @@ class NeverDeadApp {
   private readonly zombiesTag = document.createElement("div");
   private readonly hudToolbar = document.createElement("div");
   private readonly quitLevelButton = document.createElement("button");
+  private readonly vrButton = document.createElement("button");
   private readonly thirdPersonButton = document.createElement("button");
   private readonly debugButton = document.createElement("button");
   private readonly debugReadout = document.createElement("div");
@@ -41,6 +46,8 @@ class NeverDeadApp {
   private readonly crosshair = document.createElement("div");
   private readonly statusNote = document.createElement("div");
   private readonly playerInput = document.createElement("input");
+  private readonly inputRow = document.createElement("div");
+  private readonly generateButton = document.createElement("button");
   private readonly worldGrid = document.createElement("div");
   private readonly menuError = document.createElement("p");
 
@@ -50,11 +57,13 @@ class NeverDeadApp {
   private damageFlashTimer: number | null = null;
   private menuErrorMessage: string | null = null;
   private combatHudState: CombatHudState = createInitialCombatHudState(0);
+  private xrState: XrSessionState = createUncheckedXrSessionState();
   private debugCameraInfo: DebugCameraInfo = {
     enabled: false,
     mode: "firstPerson",
     position: { x: 0, y: 0, z: 0 }
   };
+  private generatedWorlds: WorldDefinition[] = [];
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -78,6 +87,7 @@ class NeverDeadApp {
     this.zombiesTag.className = "hud-pill";
     this.hudToolbar.className = "hud-toolbar";
     this.quitLevelButton.className = "hud-button";
+    this.vrButton.className = "hud-button";
     this.thirdPersonButton.className = "hud-button";
     this.debugButton.className = "hud-button";
     this.debugReadout.className = "debug-readout";
@@ -89,22 +99,40 @@ class NeverDeadApp {
     menuCard.className = "menu-card";
     menuCard.innerHTML = `
       <span class="eyebrow">Spark + Three FPS Prototype</span>
-      <h1 class="menu-title">Never dead</h1>
       <p class="menu-copy">
-        Pick a world from the asset folder, then drop into a first-person splat arena with a camera-mounted weapon view driving the action.
+        Type a location to generate a World Labs shooter arena, or jump straight into one of the preset splat worlds from the asset folder.
       </p>
-      <label class="field-label" for="player-text">Textbox input</label>
+      <label class="field-label" for="player-text">Where do you want to play?</label>
     `;
 
     this.playerInput.className = "player-input";
     this.playerInput.id = "player-text";
-    this.playerInput.placeholder = "Stored for later. Add any callsign or note.";
+    this.playerInput.placeholder = "desert canyon outpost";
     this.playerInput.autocomplete = "off";
     this.playerInput.spellcheck = false;
-    this.menuError.className = "menu-error";
+    this.playerInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
 
+      event.preventDefault();
+      void this.generateAndPlayWorld();
+    });
+
+    this.inputRow.className = "input-row";
+
+    this.generateButton.type = "button";
+    this.generateButton.className = "button-primary generate-button";
+    this.generateButton.textContent = "Generate & Play";
+    this.generateButton.addEventListener("click", () => {
+      void this.generateAndPlayWorld();
+    });
+
+    this.menuError.className = "menu-error";
     this.worldGrid.className = "world-grid";
-    menuCard.append(this.menuError, this.playerInput, this.worldGrid);
+
+    this.inputRow.append(this.playerInput, this.generateButton);
+    menuCard.append(this.menuError, this.inputRow, this.worldGrid);
     this.menu.append(menuCard);
 
     this.overlayCard.append(this.overlayTitle, this.overlayCopy, this.overlayActions);
@@ -128,6 +156,20 @@ class NeverDeadApp {
       }
 
       this.backToMenu();
+    });
+    this.vrButton.type = "button";
+    this.vrButton.textContent = "Checking VR";
+    this.vrButton.addEventListener("click", () => {
+      if (!this.game || this.state.kind !== "playing") {
+        return;
+      }
+
+      if (this.xrState.isPresenting) {
+        void this.game.exitVr();
+        return;
+      }
+
+      void this.game.enterVr();
     });
     this.thirdPersonButton.type = "button";
     this.thirdPersonButton.addEventListener("click", () => {
@@ -162,6 +204,7 @@ class NeverDeadApp {
 
     this.hudToolbar.append(
       this.quitLevelButton,
+      this.vrButton,
       this.thirdPersonButton,
       this.debugButton,
       this.debugReadout
@@ -172,7 +215,7 @@ class NeverDeadApp {
     this.root.append(this.shell);
 
     this.playerInput.addEventListener("input", () => {
-      this.session.playerText = this.playerInput.value;
+      this.session.playerText = this.playerInput.value.trim();
       this.renderHud();
     });
 
@@ -183,22 +226,32 @@ class NeverDeadApp {
   }
 
   private renderWorldButtons(): void {
-    if (worldDefinitions.length === 0) {
+    const availableWorlds = buildMenuWorlds(worldDefinitions, this.generatedWorlds);
+
+    if (availableWorlds.length === 0) {
       const empty = document.createElement("p");
       empty.className = "menu-copy";
-      empty.textContent = "No matching world pairs were found in /assets.";
+      empty.textContent = "No preset or generated worlds are available yet.";
       this.worldGrid.replaceChildren(empty);
       return;
     }
 
-    const buttons = worldDefinitions.map((world, index) => {
+    const buttons = availableWorlds.map((world, index) => {
       const button = document.createElement("button");
-      button.className = "world-button";
+      button.className = `world-button ${world.source === "generated" ? "generated" : ""}`;
+      const sourceLabel = world.source === "generated" ? "Generated" : "Preset";
+      const meta =
+        world.source === "generated"
+          ? "Generated live from World Labs and cached for this session."
+          : null;
+
       button.innerHTML = `
+        <span class="world-badge">${sourceLabel}</span>
         <span class="world-label">${world.label}</span>
-        <span class="world-meta">SPZ render + GLB collision pair</span>
+        ${meta ? `<span class="world-meta">${meta}</span>` : ""}
         <span class="world-index">${String(index + 1).padStart(2, "0")}</span>
       `;
+      button.title = world.promptText ?? world.label;
       button.addEventListener("click", () => {
         void this.startWorld(world);
       });
@@ -208,10 +261,71 @@ class NeverDeadApp {
     this.worldGrid.replaceChildren(...buttons);
   }
 
+  private async generateAndPlayWorld(): Promise<void> {
+    if (this.isMenuBusy()) {
+      return;
+    }
+
+    let location: string;
+
+    try {
+      location = normalizeLocationInput(this.playerInput.value);
+    } catch (error) {
+      this.menuErrorMessage =
+        error instanceof Error ? error.message : "Enter a location before generating a world.";
+      this.state = { kind: "menu" };
+      this.render();
+      return;
+    }
+
+    this.menuErrorMessage = null;
+    this.session.playerText = location;
+    this.state = {
+      kind: "requesting",
+      location,
+      statusMessage: "Sending your prompt to World Labs."
+    };
+    this.render();
+
+    try {
+      const world = await generateWorldFromLocation(location, {
+        onProgress: (progress) => {
+          if (progress.phase === "requesting") {
+            this.state = {
+              kind: "requesting",
+              location,
+              statusMessage: progress.message
+            };
+          } else {
+            this.state = {
+              kind: "polling",
+              location,
+              statusMessage: progress.message,
+              operationId: progress.operationId
+            };
+          }
+
+          this.render();
+        }
+      });
+
+      this.generatedWorlds = rememberGeneratedWorld(this.generatedWorlds, world);
+      this.renderWorldButtons();
+      await this.startWorld(world);
+    } catch (error) {
+      console.error(error);
+      this.menuErrorMessage =
+        error instanceof Error ? error.message : "World generation failed. Please try again.";
+      this.state = { kind: "menu" };
+      this.render();
+    }
+  }
+
   private async startWorld(world: WorldDefinition): Promise<void> {
     this.menuErrorMessage = null;
     this.combatHudState = createInitialCombatHudState(0);
-    this.session.playerText = this.playerInput.value.trim();
+    this.session.playerText =
+      this.playerInput.value.trim() || (world.source === "generated" ? world.label : "");
     this.session.selectedWorldId = world.id;
     this.destroyGame();
 
@@ -225,6 +339,7 @@ class NeverDeadApp {
       callbacks: {
         onReady: () => {
           this.debugCameraInfo = this.game?.getDebugCameraInfo() ?? this.debugCameraInfo;
+          this.xrState = this.game?.getXrState() ?? this.xrState;
           this.state = { kind: "playing", world };
           this.render();
         },
@@ -245,6 +360,12 @@ class NeverDeadApp {
           if (this.state.kind === "playing") {
             this.render();
           }
+        },
+        onXrStateChange: (state) => {
+          this.xrState = state;
+          if (this.state.kind === "playing") {
+            this.renderHud();
+          }
         }
       }
     });
@@ -256,7 +377,8 @@ class NeverDeadApp {
     } catch (error) {
       console.error(error);
       this.destroyGame();
-      this.menuErrorMessage = "This world failed to initialize. Check the browser console and try another world.";
+      this.menuErrorMessage =
+        "This world failed to initialize. Check the browser console and try another world.";
       this.state = { kind: "menu" };
       this.render();
     }
@@ -271,6 +393,7 @@ class NeverDeadApp {
       mode: "firstPerson",
       position: { x: 0, y: 0, z: 0 }
     };
+    this.xrState = createUncheckedXrSessionState();
     this.state = { kind: "menu" };
     this.render();
   }
@@ -278,28 +401,50 @@ class NeverDeadApp {
   private destroyGame(): void {
     this.game?.destroy();
     this.game = null;
+    this.xrState = createUncheckedXrSessionState();
     this.stage.innerHTML = "";
   }
 
   private render(): void {
-    const isMenu = this.state.kind === "menu";
-    this.menu.classList.toggle("hidden", !isMenu);
-    this.overlay.classList.toggle(
-      "visible",
-      this.state.kind === "loading" || this.combatHudState.gameOver
-    );
+    const menuVisible = this.state.kind === "menu" || this.state.kind === "requesting" || this.state.kind === "polling";
+    const overlayVisible =
+      this.state.kind === "requesting" ||
+      this.state.kind === "polling" ||
+      this.state.kind === "loading" ||
+      this.combatHudState.gameOver;
+
+    this.menu.classList.toggle("hidden", !menuVisible);
+    this.overlay.classList.toggle("visible", overlayVisible);
     this.hud.classList.toggle("visible", this.state.kind === "playing");
     this.menuError.textContent = this.menuErrorMessage ?? "";
     this.menuError.hidden = !this.menuErrorMessage;
+    this.generateButton.textContent =
+      this.state.kind === "requesting" || this.state.kind === "polling"
+        ? "Generating..."
+        : "Generate & Play";
+    this.playerInput.disabled = this.isMenuBusy();
+    this.generateButton.disabled = this.isMenuBusy();
     this.renderOverlay();
     this.renderHud();
-    this.toggleWorldButtons(this.state.kind === "loading");
+    this.toggleWorldButtons(this.isMenuBusy());
   }
 
   private renderOverlay(): void {
     switch (this.state.kind) {
       case "menu":
         this.overlay.classList.remove("visible");
+        return;
+      case "requesting":
+        this.overlayTitle.textContent = `Generating ${this.state.location}`;
+        this.overlayCopy.textContent = this.state.statusMessage;
+        this.overlayActions.style.display = "none";
+        return;
+      case "polling":
+        this.overlayTitle.textContent = `Generating ${this.state.location}`;
+        this.overlayCopy.textContent = this.state.operationId
+          ? `${this.state.statusMessage} Operation: ${this.state.operationId}.`
+          : this.state.statusMessage;
+        this.overlayActions.style.display = "none";
         return;
       case "playing":
         if (!this.combatHudState.gameOver) {
@@ -314,7 +459,9 @@ class NeverDeadApp {
       case "loading":
         this.overlayTitle.textContent = `Loading ${this.state.world.label}`;
         this.overlayCopy.textContent =
-          "Parsing the selected SPZ splat world, preparing the matching GLB collision mesh, mounting the first-person view mesh, and spawning zombies.";
+          this.state.world.source === "generated"
+            ? "World Labs finished the map. Preparing the splat scene, collision mesh, first-person view, and zombie wave."
+            : "Parsing the selected SPZ splat world, preparing the matching GLB collision mesh, mounting the first-person view mesh, and spawning zombies.";
         this.overlayActions.style.display = "none";
         break;
     }
@@ -329,35 +476,69 @@ class NeverDeadApp {
     this.scoreTag.textContent = `Score: ${this.combatHudState.score}`;
     this.zombiesTag.textContent = `Zombies: ${this.combatHudState.zombiesRemaining}`;
     this.playerTag.textContent = this.session.playerText
-      ? `Textbox: ${this.session.playerText}`
-      : "Textbox: Empty";
+      ? `Location: ${this.session.playerText}`
+      : "Location: Empty";
     this.playerTag.style.display = this.session.playerText ? "" : "none";
+    this.vrButton.textContent = this.getVrButtonLabel();
+    this.vrButton.disabled =
+      !activeWorld ||
+      this.state.kind !== "playing" ||
+      this.combatHudState.gameOver ||
+      !this.xrState.checked ||
+      this.xrState.status === "unsupported" ||
+      this.xrState.status === "error" ||
+      this.xrState.status === "entering";
     this.thirdPersonButton.textContent =
       this.debugCameraInfo.mode === "thirdPerson" ? "First Person" : "Third Person";
     this.quitLevelButton.style.display =
       activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver ? "" : "none";
+    this.vrButton.style.display =
+      activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver ? "" : "none";
     this.thirdPersonButton.style.display =
-      activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver
+      activeWorld &&
+      this.state.kind === "playing" &&
+      !this.combatHudState.gameOver &&
+      !this.xrState.isPresenting
         ? ""
         : "none";
     this.debugButton.textContent = this.debugCameraInfo.enabled ? "Exit Debug View" : "Debug View";
     this.debugButton.style.display =
-      activeWorld && this.state.kind === "playing" && !this.combatHudState.gameOver
+      activeWorld &&
+      this.state.kind === "playing" &&
+      !this.combatHudState.gameOver &&
+      !this.xrState.isPresenting
         ? ""
         : "none";
-    this.debugReadout.hidden = this.debugCameraInfo.mode === "firstPerson";
+    this.debugReadout.hidden =
+      this.debugCameraInfo.mode === "firstPerson" || this.xrState.isPresenting;
     this.debugReadout.textContent = `${this.getCameraLabel()} ${this.formatAxis(this.debugCameraInfo.position.x)} ${this.formatAxis(this.debugCameraInfo.position.y)} ${this.formatAxis(this.debugCameraInfo.position.z)}`;
     this.crosshair.classList.toggle(
       "hidden",
-      this.debugCameraInfo.enabled || this.combatHudState.gameOver
+      this.debugCameraInfo.enabled || this.combatHudState.gameOver || this.xrState.isPresenting
     );
     this.statusNote.textContent = this.combatHudState.gameOver
       ? "Zombies attack for 10 damage every 2 seconds in melee range. Restart to fight the wave again."
-      : this.debugCameraInfo.enabled
-      ? "Debug view is active. Drag to orbit, scroll to zoom, and click the button again to return to gameplay."
-      : this.debugCameraInfo.mode === "thirdPerson"
-      ? "Third-person camera is active for chase-view debugging. The player view mesh stays first-person only, so no avatar is shown from this camera. Use Debug View for the free orbit camera."
-      : `Use WASD to move, Arrow keys to aim, Space to jump, Option to shoot, and survive ${ZOMBIE_COUNT} zombies with the first-person weapon view locked to the camera.`;
+      : this.xrState.isPresenting
+        ? "VR is active. Left stick moves, right stick turns, right trigger shoots, and the left face button jumps. Leaving the level or dying exits VR."
+        : !this.xrState.checked
+          ? "Checking WebXR support for this browser."
+          : this.xrState.status === "error" || this.xrState.status === "unsupported"
+            ? this.xrState.message ?? "Immersive VR is unavailable in this browser."
+            : this.xrState.canEnter
+              ? "VR is available for this loaded world. Use Enter VR to switch into headset play."
+              : this.debugCameraInfo.enabled
+                ? "Debug view is active. Drag to orbit, scroll to zoom, and click the button again to return to gameplay."
+                : this.debugCameraInfo.mode === "thirdPerson"
+                  ? "Third-person camera is active for chase-view debugging. The player view mesh stays first-person only, so no avatar is shown from this camera. Use Debug View for the free orbit camera."
+                  : `Use WASD to move, Arrow keys to aim, Space to jump, Option to shoot, and survive ${ZOMBIE_COUNT} zombies with the first-person weapon view locked to the camera.`;
+  }
+
+  private isMenuBusy(): boolean {
+    return (
+      this.state.kind === "requesting" ||
+      this.state.kind === "polling" ||
+      this.state.kind === "loading"
+    );
   }
 
   private toggleWorldButtons(disabled: boolean): void {
@@ -413,6 +594,27 @@ class NeverDeadApp {
         return "3P Cam";
       default:
         return "Cam";
+    }
+  }
+
+  private getVrButtonLabel(): string {
+    if (this.xrState.isPresenting) {
+      return "Exit VR";
+    }
+
+    if (!this.xrState.checked) {
+      return "Checking VR";
+    }
+
+    switch (this.xrState.status) {
+      case "available":
+        return "Enter VR";
+      case "entering":
+        return "Entering VR...";
+      case "error":
+        return "VR Error";
+      default:
+        return "VR Unavailable";
     }
   }
 }

@@ -1,14 +1,19 @@
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import {
   AmbientLight,
+  BufferGeometry,
+  Camera,
   Clock,
   Color,
   DirectionalLight,
+  Line,
+  LineBasicMaterial,
   MathUtils,
   Mesh,
   MeshBasicMaterial,
   Object3D,
   PerspectiveCamera,
+  Quaternion,
   Raycaster,
   Scene,
   SphereGeometry,
@@ -27,8 +32,21 @@ import {
 import { CharacterAnimator, getHeroLayer } from "./CharacterAnimator";
 import { CollisionWorld } from "./CollisionWorld";
 import { type GameKey, stepLookPitch, toGameKey } from "./controls";
+import type {
+  CombatHudState,
+  SessionState,
+  WorldDefinition,
+  XrSessionState
+} from "./types";
+import { XrHudPanel } from "./XrHudPanel";
+import {
+  createUncheckedXrSessionState,
+  createXrSessionState,
+  deriveXrActionState,
+  getInitialXrSessionState,
+  isReferenceSpaceFallbackCandidate
+} from "./xr";
 import { zombieModelUrl, heroModelUrl } from "./worlds";
-import type { CombatHudState, SessionState, WorldDefinition } from "./types";
 import { ZombieActor, type ZombieTemplate, ZOMBIE_TARGET_HEIGHT } from "./ZombieActor";
 
 const STAND_HEIGHT = 1.72;
@@ -42,6 +60,7 @@ const IMPACT_LIFETIME_MS = 180;
 const BLOOD_SPLASH_LIFETIME_MS = 320;
 const CAMERA_SMOOTHING = 14;
 const TURN_SPEED = 2.4;
+const XR_TURN_SPEED = 2.9;
 const LOOK_SPEED = 1.2;
 const THIRD_PERSON_DISTANCE = 2.45;
 const THIRD_PERSON_HEIGHT_OFFSET = 0.38;
@@ -63,6 +82,8 @@ const ZOMBIE_GROUND_RAY_HEIGHT = 8;
 const ZOMBIE_FACING_IDLE = new Vector3(0, 0, -1);
 const BLOOD_PARTICLE_COUNT = 7;
 const BLOOD_GRAVITY = 7;
+const XR_AIM_DISTANCE = 10;
+const XR_RETICLE_RADIUS = 0.03;
 
 interface EffectMarker {
   mesh: Mesh;
@@ -76,12 +97,20 @@ interface ZombieRaycastHit {
   point: Vector3;
 }
 
+interface ShotTraceResult {
+  type: "world" | "zombie";
+  distance: number;
+  point: Vector3;
+  zombie?: ZombieActor;
+}
+
 interface GameCallbacks {
   onReady: () => void;
   onShotFeedback: () => void;
   onPlayerHit: () => void;
   onDebugCameraUpdate: (info: DebugCameraInfo) => void;
   onCombatUpdate: (state: CombatHudState) => void;
+  onXrStateChange: (state: XrSessionState) => void;
 }
 
 interface FpsGameOptions {
@@ -98,6 +127,22 @@ interface PlayerState {
   eyeHeight: number;
   onGround: boolean;
   jumpQueued: boolean;
+}
+
+interface NormalizedInputState {
+  moveX: number;
+  moveZ: number;
+  turnX: number;
+  lookDirection: number;
+  jumpPressed: boolean;
+  shootPressed: boolean;
+}
+
+interface XrControllerSlot {
+  index: number;
+  controller: Object3D;
+  handedness: XRHandedness | "none";
+  inputSource: XRInputSource | null;
 }
 
 export interface DebugCameraInfo {
@@ -146,6 +191,10 @@ export class FpsGame {
   private readonly thirdPersonRayDirection = new Vector3();
   private readonly thirdPersonForward = new Vector3();
   private readonly thirdPersonRight = new Vector3();
+  private readonly xrLocalHeadOffset = new Vector3();
+  private readonly xrCameraWorldPosition = new Vector3();
+  private readonly xrHeadDirection = new Vector3();
+  private readonly xrControllerQuaternion = new Quaternion();
   private readonly impactGeometry = new SphereGeometry(0.07, 12, 12);
   private readonly impactMaterial = new MeshBasicMaterial({
     color: new Color("#ffba63")
@@ -157,6 +206,23 @@ export class FpsGame {
   ];
   private readonly bloodVelocity = new Vector3();
   private readonly bloodOffset = new Vector3();
+  private readonly xrHud = new XrHudPanel();
+  private readonly xrAimGeometry = new BufferGeometry().setFromPoints([
+    new Vector3(0, 0, 0),
+    new Vector3(0, 0, -1)
+  ]);
+  private readonly xrAimMaterial = new LineBasicMaterial({
+    color: new Color("#ffae58"),
+    transparent: true,
+    opacity: 0.92
+  });
+  private readonly xrAimRay = new Line(this.xrAimGeometry, this.xrAimMaterial);
+  private readonly xrReticleGeometry = new SphereGeometry(XR_RETICLE_RADIUS, 10, 10);
+  private readonly xrReticleMaterial = new MeshBasicMaterial({
+    color: new Color("#ffdd8a")
+  });
+  private readonly xrReticle = new Mesh(this.xrReticleGeometry, this.xrReticleMaterial);
+  private readonly xrControllers: XrControllerSlot[] = [];
   private readonly player: PlayerState = {
     position: new Vector3(),
     velocity: new Vector3(),
@@ -173,9 +239,13 @@ export class FpsGame {
   private effects: EffectMarker[] = [];
   private shotCooldown = 0;
   private combatState: CombatHudState = createInitialCombatHudState(0);
+  private xrState: XrSessionState = createUncheckedXrSessionState();
+  private xrReferenceSpaceType: "local-floor" | "local" = "local-floor";
   private debugEnabled = false;
   private thirdPersonEnabled = false;
   private destroyed = false;
+  private xrSessionEnding = false;
+  private previousJumpPressed = false;
   private cameraBaseX = 0;
   private cameraBaseZ = 0;
   private lookPitch = 0;
@@ -189,14 +259,17 @@ export class FpsGame {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.outputColorSpace = "srgb";
     this.renderer.setClearColor(new Color("#05070b"));
+    this.renderer.xr.enabled = true;
 
     this.scene.background = new Color("#05070b");
     this.scene.add(this.playerRoot);
     this.playerRoot.add(this.camera);
     this.scene.add(this.thirdPersonCamera);
     this.scene.add(this.debugCamera);
+    this.scene.add(this.xrReticle);
     this.camera.layers.enable(getHeroLayer());
     this.camera.add(this.spark);
+    this.camera.add(this.xrHud.root);
     this.camera.position.set(this.cameraBaseX, this.player.eyeHeight, this.cameraBaseZ);
     this.camera.rotation.set(0, 0, 0);
     this.thirdPersonCamera.position.set(0, this.player.eyeHeight + 0.8, 2.6);
@@ -207,6 +280,28 @@ export class FpsGame {
     this.orbitControls.enableDamping = true;
     this.orbitControls.dampingFactor = 0.08;
     this.orbitControls.screenSpacePanning = true;
+
+    this.xrAimRay.visible = false;
+    this.xrReticle.visible = false;
+    this.xrReticle.renderOrder = 12;
+
+    for (let index = 0; index < 2; index += 1) {
+      const controller = this.renderer.xr.getController(index);
+      controller.addEventListener("connected", (event) => {
+        const inputSource = (event as unknown as { data: XRInputSource }).data;
+        this.handleXrControllerConnected(index, inputSource);
+      });
+      controller.addEventListener("disconnected", () => {
+        this.handleXrControllerDisconnected(index);
+      });
+      this.scene.add(controller);
+      this.xrControllers.push({
+        index,
+        controller,
+        handedness: "none",
+        inputSource: null
+      });
+    }
 
     this.scene.add(new AmbientLight("#9ebcff", 0.35));
     const keyLight = new DirectionalLight("#ffd39d", 1.1);
@@ -221,6 +316,7 @@ export class FpsGame {
     window.addEventListener("resize", this.handleResize);
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
+    void this.refreshXrAvailability();
 
     const [collisionWorld, character, zombieTemplate] = await Promise.all([
       CollisionWorld.load(this.world.collisionGlbUrl),
@@ -248,16 +344,19 @@ export class FpsGame {
 
     await this.splatWorld.initialized;
 
-    const spawnPoint = collisionWorld.getSpawnPoint(STAND_HEIGHT);
+    const spawnPoint = collisionWorld.getSpawnPoint(STAND_HEIGHT, this.world.spawnOffset);
     this.player.position.copy(spawnPoint);
     this.playerRoot.position.copy(spawnPoint);
+    this.playerRoot.rotation.y = this.world.initialYaw ?? 0;
     this.player.onGround = true;
-    this.camera.position.set(this.cameraBaseX, this.player.eyeHeight, this.cameraBaseZ);
+    this.restoreFlatCameraMode();
     this.updateThirdPersonCamera(1);
 
     this.spawnZombies(zombieTemplate);
     this.resetDebugCamera();
     this.emitCombatUpdate();
+    this.updateXrHudPanel();
+    this.updateXrPresentationVisuals();
 
     this.clock.start();
     this.renderer.setAnimationLoop(this.animate);
@@ -267,6 +366,7 @@ export class FpsGame {
 
   destroy(): void {
     this.destroyed = true;
+    void this.endXrSession();
     this.renderer.setAnimationLoop(null);
     this.container.innerHTML = "";
     window.removeEventListener("resize", this.handleResize);
@@ -276,6 +376,11 @@ export class FpsGame {
     this.impactGeometry.dispose();
     this.impactMaterial.dispose();
     this.bloodGeometry.dispose();
+    this.xrHud.dispose();
+    this.xrAimGeometry.dispose();
+    this.xrAimMaterial.dispose();
+    this.xrReticleGeometry.dispose();
+    this.xrReticleMaterial.dispose();
     for (const material of this.bloodMaterials) {
       material.dispose();
     }
@@ -289,8 +394,79 @@ export class FpsGame {
     this.zombies = [];
   }
 
-  toggleDebugMode(): boolean {
+  async enterVr(): Promise<void> {
     if (this.destroyed || !this.collisionWorld || this.combatState.gameOver) {
+      return;
+    }
+
+    if (!this.xrState.checked) {
+      await this.refreshXrAvailability();
+    }
+
+    if (!this.xrState.supported || this.xrState.status === "entering" || this.isXrPresenting()) {
+      return;
+    }
+
+    this.thirdPersonEnabled = false;
+    this.debugEnabled = false;
+    this.orbitControls.enabled = false;
+    this.pressedKeys.clear();
+    this.previousJumpPressed = false;
+    this.player.jumpQueued = false;
+    this.shotCooldown = 0;
+    this.attachSparkToActiveCamera();
+    this.pushDebugCameraUpdate();
+    this.setXrState(createXrSessionState("entering"));
+
+    try {
+      try {
+        await this.beginXrSession("local-floor");
+      } catch (error) {
+        if (!isReferenceSpaceFallbackCandidate(error)) {
+          throw error;
+        }
+
+        await this.beginXrSession("local");
+      }
+
+      this.applyVrCameraMode();
+      this.updateXrHudPanel();
+      this.updateXrPresentationVisuals();
+      this.attachSparkToActiveCamera();
+      this.pushDebugCameraUpdate();
+      this.setXrState(createXrSessionState("presenting"));
+    } catch (error) {
+      console.error(error);
+      this.restoreFlatCameraMode();
+      this.updateXrPresentationVisuals();
+      this.setXrState(
+        createXrSessionState(
+          "error",
+          "Unable to start immersive VR. Check browser permissions and headset availability."
+        )
+      );
+    }
+  }
+
+  async exitVr(): Promise<void> {
+    if (!this.isXrPresenting()) {
+      return;
+    }
+
+    await this.endXrSession();
+  }
+
+  getXrState(): XrSessionState {
+    return this.xrState;
+  }
+
+  toggleDebugMode(): boolean {
+    if (
+      this.destroyed ||
+      !this.collisionWorld ||
+      this.combatState.gameOver ||
+      this.isXrPresenting()
+    ) {
       return this.debugEnabled;
     }
 
@@ -310,7 +486,12 @@ export class FpsGame {
   }
 
   toggleThirdPersonMode(): boolean {
-    if (this.destroyed || !this.collisionWorld || this.combatState.gameOver) {
+    if (
+      this.destroyed ||
+      !this.collisionWorld ||
+      this.combatState.gameOver ||
+      this.isXrPresenting()
+    ) {
       return this.thirdPersonEnabled;
     }
 
@@ -328,14 +509,14 @@ export class FpsGame {
   }
 
   getDebugCameraInfo(): DebugCameraInfo {
-    const activeCamera = this.getActiveCamera();
+    const activeCamera = this.getRenderCamera();
     const position = activeCamera.getWorldPosition(new Vector3());
 
     return {
       enabled: this.debugEnabled,
       mode: this.debugEnabled
         ? "debug"
-        : this.thirdPersonEnabled
+        : this.thirdPersonEnabled && !this.isXrPresenting()
           ? "thirdPerson"
           : "firstPerson",
       position: {
@@ -364,10 +545,6 @@ export class FpsGame {
       return;
     }
 
-    if (code === "Space") {
-      this.player.jumpQueued = true;
-    }
-
     this.pressedKeys.add(code);
     event.preventDefault();
   };
@@ -389,7 +566,7 @@ export class FpsGame {
 
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.update(delta);
-    this.renderer.render(this.scene, this.getActiveCamera());
+    this.renderer.render(this.scene, this.getRenderCamera());
   };
 
   private update(deltaSeconds: number): void {
@@ -399,53 +576,59 @@ export class FpsGame {
       return;
     }
 
+    this.updateXrPresentationVisuals();
+
     if (this.debugEnabled || this.combatState.gameOver) {
       if (this.debugEnabled) {
         this.orbitControls.update();
       }
+
+      if (this.combatState.gameOver && this.isXrPresenting()) {
+        void this.exitVr();
+      }
+
+      this.updateXrAimAssist();
       this.pushDebugCameraUpdate();
       return;
     }
 
-    if (this.pressedKeys.has("ArrowLeft")) {
-      this.playerRoot.rotation.y += TURN_SPEED * deltaSeconds;
+    const input = this.collectInputState();
+    const isPresenting = this.isXrPresenting();
+    const movementYaw = isPresenting ? this.getXrMovementYaw() : this.playerRoot.rotation.y;
+    const xrLocalHeadOffset = isPresenting ? this.getXrLocalHeadOffset(this.xrLocalHeadOffset) : null;
+
+    if (isPresenting && xrLocalHeadOffset) {
+      this.player.position.x = this.playerRoot.position.x + xrLocalHeadOffset.x;
+      this.player.position.z = this.playerRoot.position.z + xrLocalHeadOffset.z;
+      this.player.height = Math.max(STAND_HEIGHT, xrLocalHeadOffset.y + 0.18);
+      this.player.eyeHeight = Math.max(1.05, xrLocalHeadOffset.y);
+    } else {
+      this.player.height = STAND_HEIGHT;
+      this.player.eyeHeight = STAND_EYE_HEIGHT;
     }
-    if (this.pressedKeys.has("ArrowRight")) {
-      this.playerRoot.rotation.y -= TURN_SPEED * deltaSeconds;
+
+    if (input.turnX !== 0) {
+      const turnSpeed = isPresenting ? XR_TURN_SPEED : TURN_SPEED;
+      this.playerRoot.rotation.y += input.turnX * turnSpeed * deltaSeconds;
     }
-    if (!this.thirdPersonEnabled) {
-      const lookDirection =
-        (this.pressedKeys.has("ArrowUp") ? 1 : 0) - (this.pressedKeys.has("ArrowDown") ? 1 : 0);
+
+    if (!this.thirdPersonEnabled && !isPresenting) {
       this.lookPitch = stepLookPitch(
         this.lookPitch,
-        lookDirection,
+        input.lookDirection,
         deltaSeconds,
         LOOK_SPEED
       );
       this.camera.rotation.set(this.lookPitch, 0, 0);
     }
 
-    this.movementVector.set(0, 0, 0);
-    if (this.pressedKeys.has("KeyW")) {
-      this.movementVector.z -= 1;
-    }
-    if (this.pressedKeys.has("KeyS")) {
-      this.movementVector.z += 1;
-    }
-    if (this.pressedKeys.has("KeyA")) {
-      this.movementVector.x -= 1;
-    }
-    if (this.pressedKeys.has("KeyD")) {
-      this.movementVector.x += 1;
-    }
-
-    if (this.movementVector.lengthSq() > 0) {
+    this.movementVector.set(input.moveX, 0, input.moveZ);
+    if (this.movementVector.lengthSq() > 1) {
       this.movementVector.normalize();
     }
 
-    const yaw = this.playerRoot.rotation.y;
-    this.forwardVector.set(Math.sin(yaw), 0, -Math.cos(yaw));
-    this.rightVector.set(Math.cos(yaw), 0, Math.sin(yaw));
+    this.forwardVector.set(Math.sin(movementYaw), 0, -Math.cos(movementYaw));
+    this.rightVector.set(Math.cos(movementYaw), 0, Math.sin(movementYaw));
 
     const horizontalVelocity = new Vector3()
       .addScaledVector(this.forwardVector, -this.movementVector.z)
@@ -457,6 +640,11 @@ export class FpsGame {
 
     this.player.velocity.x = horizontalVelocity.x;
     this.player.velocity.z = horizontalVelocity.z;
+
+    if (input.jumpPressed && !this.previousJumpPressed) {
+      this.player.jumpQueued = true;
+    }
+    this.previousJumpPressed = input.jumpPressed;
 
     if (this.player.onGround && this.player.jumpQueued) {
       this.player.velocity.y = JUMP_VELOCITY;
@@ -470,7 +658,7 @@ export class FpsGame {
     const proposedPosition = this.player.position
       .clone()
       .addScaledVector(horizontalVelocity, deltaSeconds)
-      .addScaledVector(new Vector3(0, 1, 0), verticalDisplacement);
+      .addScaledVector(UP_AXIS, verticalDisplacement);
 
     const collision = this.collisionWorld.resolveCapsule(
       proposedPosition,
@@ -480,17 +668,25 @@ export class FpsGame {
     );
 
     this.player.position.copy(collision.position);
-    this.playerRoot.position.copy(this.player.position);
     this.player.onGround = collision.grounded;
+
+    if (xrLocalHeadOffset) {
+      this.playerRoot.position.set(
+        this.player.position.x - xrLocalHeadOffset.x,
+        this.player.position.y,
+        this.player.position.z - xrLocalHeadOffset.z
+      );
+    } else {
+      this.playerRoot.position.copy(this.player.position);
+    }
 
     if (this.player.onGround && this.player.velocity.y < 0) {
       this.player.velocity.y = 0;
     }
 
-    const isShooting = this.pressedKeys.has("Shoot");
     this.shotCooldown -= deltaSeconds;
 
-    if (isShooting && this.shotCooldown <= 0) {
+    if (input.shootPressed && this.shotCooldown <= 0) {
       this.fireShot();
       this.shotCooldown = SHOT_INTERVAL;
     }
@@ -498,7 +694,59 @@ export class FpsGame {
     this.updateZombies(deltaSeconds);
     this.updatePlayerCameraFromHead(deltaSeconds);
     this.updateThirdPersonCamera(deltaSeconds);
+    this.updateXrAimAssist();
     this.pushDebugCameraUpdate();
+  }
+
+  private collectInputState(): NormalizedInputState {
+    const state: NormalizedInputState = {
+      moveX:
+        (this.pressedKeys.has("KeyD") ? 1 : 0) -
+        (this.pressedKeys.has("KeyA") ? 1 : 0),
+      moveZ:
+        (this.pressedKeys.has("KeyS") ? 1 : 0) -
+        (this.pressedKeys.has("KeyW") ? 1 : 0),
+      turnX:
+        (this.pressedKeys.has("ArrowLeft") ? 1 : 0) -
+        (this.pressedKeys.has("ArrowRight") ? 1 : 0),
+      lookDirection:
+        (this.pressedKeys.has("ArrowUp") ? 1 : 0) -
+        (this.pressedKeys.has("ArrowDown") ? 1 : 0),
+      jumpPressed: this.pressedKeys.has("Space"),
+      shootPressed: this.pressedKeys.has("Shoot")
+    };
+
+    if (!this.isXrPresenting()) {
+      return state;
+    }
+
+    const xrState = deriveXrActionState(
+      this.xrControllers.flatMap((slot) => {
+        const gamepad = slot.inputSource?.gamepad;
+        if (!gamepad) {
+          return [];
+        }
+
+        return [
+          {
+            handedness: slot.handedness,
+            axes: Array.from(gamepad.axes),
+            buttons: Array.from(gamepad.buttons, (button) => ({
+              pressed: button.pressed
+            }))
+          }
+        ];
+      })
+    );
+
+    return {
+      moveX: xrState.hasLeftController ? xrState.moveX : state.moveX,
+      moveZ: xrState.hasLeftController ? xrState.moveZ : state.moveZ,
+      turnX: xrState.hasRightController ? xrState.turnX : state.turnX,
+      lookDirection: 0,
+      jumpPressed: xrState.hasLeftController ? xrState.jumpPressed : state.jumpPressed,
+      shootPressed: xrState.hasRightController ? xrState.shootPressed : state.shootPressed
+    };
   }
 
   private spawnZombies(template: ZombieTemplate): void {
@@ -556,18 +804,14 @@ export class FpsGame {
         zombie.setMode("attacking");
         zombie.state.velocity.set(0, 0, 0);
         zombie.setFacing(
-          distanceToPlayer > 0.0001
-            ? this.zombieDirection.normalize()
-            : ZOMBIE_FACING_IDLE
+          distanceToPlayer > 0.0001 ? this.zombieDirection.normalize() : ZOMBIE_FACING_IDLE
         );
       } else {
         zombie.setMode("chasing");
 
         if (distanceToPlayer > ZOMBIE_STOP_DISTANCE) {
           this.zombieDirection.normalize();
-          zombie.state.velocity
-            .copy(this.zombieDirection)
-            .multiplyScalar(ZOMBIE_SPEED);
+          zombie.state.velocity.copy(this.zombieDirection).multiplyScalar(ZOMBIE_SPEED);
 
           const proposed = zombie.state.position
             .clone()
@@ -603,6 +847,10 @@ export class FpsGame {
 
     if (combatChanged) {
       this.emitCombatUpdate();
+
+      if (this.combatState.gameOver && this.isXrPresenting()) {
+        void this.exitVr();
+      }
     }
   }
 
@@ -683,12 +931,15 @@ export class FpsGame {
 
     this.scene.updateMatrixWorld(true);
     const origin = this.getShotOriginAndDirection();
-    const worldHit = this.collisionWorld.raycast(origin, this.shotDirection, SHOT_MAX_DISTANCE);
-    const zombieHit = this.findClosestZombieHit(origin, this.shotDirection);
+    const trace = this.traceShot(origin, this.shotDirection);
 
-    if (zombieHit && (!worldHit || zombieHit.distance < worldHit.distance)) {
-      const result = zombieHit.zombie.applyDamage(BULLET_DAMAGE);
-      this.spawnBloodSplash(zombieHit.point, this.shotDirection);
+    if (!trace) {
+      return;
+    }
+
+    if (trace.type === "zombie" && trace.zombie) {
+      const result = trace.zombie.applyDamage(BULLET_DAMAGE);
+      this.spawnBloodSplash(trace.point, this.shotDirection);
       this.callbacks.onShotFeedback();
 
       if (result.killed) {
@@ -700,12 +951,8 @@ export class FpsGame {
       return;
     }
 
-    if (!worldHit) {
-      return;
-    }
-
     const impact = new Mesh(this.impactGeometry, this.impactMaterial);
-    impact.position.copy(worldHit.point);
+    impact.position.copy(trace.point);
     this.scene.add(impact);
     this.effects.push({
       mesh: impact,
@@ -714,6 +961,34 @@ export class FpsGame {
     });
 
     this.callbacks.onShotFeedback();
+  }
+
+  private traceShot(origin: Vector3, direction: Vector3): ShotTraceResult | null {
+    if (!this.collisionWorld) {
+      return null;
+    }
+
+    const worldHit = this.collisionWorld.raycast(origin, direction, SHOT_MAX_DISTANCE);
+    const zombieHit = this.findClosestZombieHit(origin, direction);
+
+    if (zombieHit && (!worldHit || zombieHit.distance < worldHit.distance)) {
+      return {
+        type: "zombie",
+        distance: zombieHit.distance,
+        point: zombieHit.point,
+        zombie: zombieHit.zombie
+      };
+    }
+
+    if (!worldHit) {
+      return null;
+    }
+
+    return {
+      type: "world",
+      distance: worldHit.distance,
+      point: worldHit.point
+    };
   }
 
   private findClosestZombieHit(origin: Vector3, direction: Vector3): ZombieRaycastHit | null {
@@ -786,9 +1061,14 @@ export class FpsGame {
 
   private emitCombatUpdate(): void {
     this.callbacks.onCombatUpdate({ ...this.combatState });
+    this.updateXrHudPanel();
   }
 
-  private getActiveCamera(): PerspectiveCamera {
+  private getRenderCamera(): Camera {
+    return this.isXrPresenting() ? this.camera : this.getActiveCamera();
+  }
+
+  private getActiveCamera(): Camera {
     if (this.debugEnabled) {
       return this.debugCamera;
     }
@@ -797,7 +1077,7 @@ export class FpsGame {
   }
 
   private attachSparkToActiveCamera(): void {
-    const activeCamera = this.getActiveCamera();
+    const activeCamera = this.getRenderCamera();
     if (this.spark.parent !== activeCamera) {
       activeCamera.add(this.spark);
     }
@@ -833,6 +1113,10 @@ export class FpsGame {
   }
 
   private updatePlayerCameraFromHead(deltaSeconds: number): void {
+    if (this.isXrPresenting()) {
+      return;
+    }
+
     this.camera.position.x = MathUtils.damp(
       this.camera.position.x,
       this.cameraBaseX,
@@ -850,7 +1134,7 @@ export class FpsGame {
   }
 
   private updateThirdPersonCamera(deltaSeconds: number): void {
-    if (!this.collisionWorld) {
+    if (!this.collisionWorld || this.isXrPresenting()) {
       return;
     }
 
@@ -888,10 +1172,7 @@ export class FpsGame {
       if (hit) {
         this.thirdPersonDesired
           .copy(hit.point)
-          .addScaledVector(
-            this.thirdPersonRayDirection,
-            -THIRD_PERSON_COLLISION_PADDING
-          );
+          .addScaledVector(this.thirdPersonRayDirection, -THIRD_PERSON_COLLISION_PADDING);
       }
     }
 
@@ -917,6 +1198,23 @@ export class FpsGame {
   }
 
   private getShotOriginAndDirection(): Vector3 {
+    if (this.isXrPresenting()) {
+      const rightController = this.getRightXrController();
+
+      if (rightController) {
+        rightController.controller.getWorldPosition(this.shotOrigin);
+        this.getControllerForward(rightController.controller, this.shotDirection);
+        this.shotOrigin.addScaledVector(this.shotDirection, 0.04);
+        return this.shotOrigin;
+      }
+
+      const xrCamera = this.renderer.xr.getCamera();
+      xrCamera.getWorldDirection(this.shotDirection);
+      xrCamera.getWorldPosition(this.shotOrigin);
+      this.shotDirection.normalize();
+      return this.shotOrigin;
+    }
+
     if (!this.thirdPersonEnabled) {
       this.camera.getWorldDirection(this.shotDirection);
       return this.camera.getWorldPosition(this.shotOrigin);
@@ -928,5 +1226,291 @@ export class FpsGame {
     this.shotOrigin.y += Math.max(0.92, this.player.eyeHeight - 0.08);
     this.shotOrigin.addScaledVector(this.shotDirection, 0.58);
     return this.shotOrigin;
+  }
+
+  private updateXrAimAssist(): void {
+    if (!this.isXrPresenting() || !this.collisionWorld || this.combatState.gameOver) {
+      this.xrAimRay.visible = false;
+      this.xrReticle.visible = false;
+      return;
+    }
+
+    const rightController = this.getRightXrController();
+    if (!rightController) {
+      this.xrAimRay.visible = false;
+      this.xrReticle.visible = false;
+      return;
+    }
+
+    this.attachXrAimRay(rightController.controller);
+    rightController.controller.getWorldPosition(this.shotOrigin);
+    this.getControllerForward(rightController.controller, this.shotDirection);
+    this.shotOrigin.addScaledVector(this.shotDirection, 0.04);
+    const trace = this.traceShot(this.shotOrigin, this.shotDirection);
+    const targetDistance = trace ? trace.distance : XR_AIM_DISTANCE;
+
+    this.xrAimRay.visible = true;
+    this.xrAimRay.scale.set(1, 1, targetDistance);
+    this.xrReticle.visible = true;
+
+    if (trace) {
+      this.xrReticle.position.copy(trace.point);
+      return;
+    }
+
+    this.xrReticle.position.copy(this.shotOrigin).addScaledVector(this.shotDirection, XR_AIM_DISTANCE);
+  }
+
+  private getXrMovementYaw(): number {
+    this.renderer.xr.getCamera().getWorldDirection(this.xrHeadDirection);
+    this.xrHeadDirection.y = 0;
+
+    if (this.xrHeadDirection.lengthSq() < 0.0001) {
+      return this.playerRoot.rotation.y;
+    }
+
+    this.xrHeadDirection.normalize();
+    return Math.atan2(this.xrHeadDirection.x, -this.xrHeadDirection.z);
+  }
+
+  private getXrLocalHeadOffset(target: Vector3): Vector3 {
+    this.playerRoot.updateMatrixWorld(true);
+    this.renderer.xr.getCamera().getWorldPosition(this.xrCameraWorldPosition);
+    return this.playerRoot.worldToLocal(target.copy(this.xrCameraWorldPosition));
+  }
+
+  private getControllerForward(controller: Object3D, target: Vector3): Vector3 {
+    controller.getWorldQuaternion(this.xrControllerQuaternion);
+    return target.set(0, 0, -1).applyQuaternion(this.xrControllerQuaternion).normalize();
+  }
+
+  private getRightXrController(): XrControllerSlot | null {
+    return this.xrControllers.find((controller) => controller.handedness === "right") ?? null;
+  }
+
+  private setXrState(nextState: XrSessionState): void {
+    const current = this.xrState;
+    const unchanged =
+      current.checked === nextState.checked &&
+      current.supported === nextState.supported &&
+      current.canEnter === nextState.canEnter &&
+      current.isPresenting === nextState.isPresenting &&
+      current.status === nextState.status &&
+      current.message === nextState.message;
+
+    if (unchanged) {
+      return;
+    }
+
+    this.xrState = nextState;
+    this.callbacks.onXrStateChange({ ...this.xrState });
+  }
+
+  private async refreshXrAvailability(): Promise<void> {
+    const probe = {
+      hasNavigatorXr: typeof navigator !== "undefined" && "xr" in navigator,
+      isSecureContext: window.isSecureContext
+    };
+    const initial = getInitialXrSessionState(probe);
+
+    if (!initial.supported) {
+      this.setXrState(initial);
+      return;
+    }
+
+    try {
+      const xr = navigator.xr;
+      if (!xr) {
+        this.setXrState(
+          createXrSessionState(
+            "unsupported",
+            "This browser does not expose WebXR immersive VR."
+          )
+        );
+        return;
+      }
+
+      const supported = await xr.isSessionSupported("immersive-vr");
+
+      if (this.destroyed || this.isXrPresenting()) {
+        return;
+      }
+
+      this.setXrState(
+        supported
+          ? createXrSessionState("available")
+          : createXrSessionState(
+              "unsupported",
+              "Immersive VR is not available on this device."
+            )
+      );
+    } catch (error) {
+      console.error(error);
+
+      if (this.destroyed || this.isXrPresenting()) {
+        return;
+      }
+
+      this.setXrState(
+        createXrSessionState(
+          "error",
+          "WebXR support could not be verified in this browser."
+        )
+      );
+    }
+  }
+
+  private handleXrControllerConnected(index: number, inputSource: XRInputSource): void {
+    const slot = this.xrControllers[index];
+    if (!slot) {
+      return;
+    }
+
+    slot.handedness = inputSource.handedness;
+    slot.inputSource = inputSource;
+
+    if (slot.handedness === "right" && this.isXrPresenting()) {
+      this.attachXrAimRay(slot.controller);
+    }
+  }
+
+  private handleXrControllerDisconnected(index: number): void {
+    const slot = this.xrControllers[index];
+    if (!slot) {
+      return;
+    }
+
+    if (slot.handedness === "right") {
+      this.detachXrAimRay();
+      this.xrReticle.visible = false;
+    }
+
+    slot.handedness = "none";
+    slot.inputSource = null;
+  }
+
+  private attachXrAimRay(controller: Object3D): void {
+    if (this.xrAimRay.parent !== controller) {
+      this.xrAimRay.removeFromParent();
+      controller.add(this.xrAimRay);
+    }
+  }
+
+  private detachXrAimRay(): void {
+    this.xrAimRay.removeFromParent();
+    this.xrAimRay.visible = false;
+  }
+
+  private updateXrPresentationVisuals(): void {
+    const presenting = this.isXrPresenting();
+    this.xrHud.setVisible(presenting);
+
+    if (this.character) {
+      this.character.root.visible = !presenting;
+    }
+
+    if (!presenting) {
+      this.detachXrAimRay();
+      this.xrReticle.visible = false;
+      return;
+    }
+
+    const rightController = this.getRightXrController();
+    if (rightController) {
+      this.attachXrAimRay(rightController.controller);
+    }
+  }
+
+  private updateXrHudPanel(): void {
+    this.xrHud.update({
+      combat: this.combatState,
+      worldLabel: this.world.label,
+      playerText: this.session.playerText,
+      referenceSpaceLabel:
+        this.xrReferenceSpaceType === "local-floor" ? "local-floor" : "local fallback"
+    });
+  }
+
+  private applyVrCameraMode(): void {
+    this.camera.position.set(0, 0, 0);
+    this.camera.rotation.set(0, 0, 0);
+  }
+
+  private restoreFlatCameraMode(): void {
+    this.player.height = STAND_HEIGHT;
+    this.player.eyeHeight = STAND_EYE_HEIGHT;
+    this.camera.position.set(this.cameraBaseX, this.player.eyeHeight, this.cameraBaseZ);
+    this.camera.rotation.set(this.lookPitch, 0, 0);
+    if (this.character) {
+      this.character.root.visible = true;
+    }
+  }
+
+  private async beginXrSession(referenceSpaceType: "local-floor" | "local"): Promise<void> {
+    const xr = navigator.xr;
+    if (!xr) {
+      throw new Error("WebXR is unavailable.");
+    }
+
+    const sessionInit: XRSessionInit = {
+      optionalFeatures: [
+        "bounded-floor",
+        "layers",
+        ...(referenceSpaceType === "local-floor" ? ["local-floor"] : [])
+      ]
+    };
+
+    this.renderer.xr.setReferenceSpaceType(referenceSpaceType);
+    const session = await xr.requestSession("immersive-vr", sessionInit);
+
+    try {
+      session.addEventListener("end", this.handleXrSessionEnded);
+      await this.renderer.xr.setSession(session);
+      this.xrReferenceSpaceType = referenceSpaceType;
+      this.xrSessionEnding = false;
+    } catch (error) {
+      session.removeEventListener("end", this.handleXrSessionEnded);
+      await session.end().catch(() => {});
+      throw error;
+    }
+  }
+
+  private async endXrSession(): Promise<void> {
+    const session = this.renderer.xr.getSession();
+    if (!session) {
+      this.handleXrSessionEnded();
+      return;
+    }
+
+    if (this.xrSessionEnding) {
+      return;
+    }
+
+    this.xrSessionEnding = true;
+
+    try {
+      await session.end();
+    } catch (error) {
+      console.warn(error);
+      this.handleXrSessionEnded();
+    }
+  }
+
+  private readonly handleXrSessionEnded = (): void => {
+    this.xrSessionEnding = false;
+    this.restoreFlatCameraMode();
+    this.updateXrPresentationVisuals();
+    this.attachSparkToActiveCamera();
+    this.pushDebugCameraUpdate();
+
+    if (this.destroyed) {
+      return;
+    }
+
+    void this.refreshXrAvailability();
+  };
+
+  private isXrPresenting(): boolean {
+    return this.renderer.xr.isPresenting;
   }
 }
